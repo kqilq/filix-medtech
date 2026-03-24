@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# User data (private, not for sharing)
+user_medicines.json
+_user_*.csv
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
