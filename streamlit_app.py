@@ -13,6 +13,17 @@ import matplotlib
 matplotlib.use("Agg")
 import os
 import io
+import datetime
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import cm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                 Image as RLImage, Table, TableStyle,
+                                 HRFlowable, KeepTogether)
+from reportlab.platypus import PageBreak
 
 # ─────────────────────────────────────────────
 #  Paths & registry
@@ -257,6 +268,204 @@ def make_spectrum_fig(px, intensity, title, color):
     fig.tight_layout()
     return fig
 
+def fig_to_bytes(fig):
+    """Convert a matplotlib figure to PNG bytes."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0)
+    return buf.read()
+
+def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, explanations, lang="en"):
+    """Generate a nicely formatted PDF report and return as bytes."""
+    buf = io.BytesIO()
+
+    # Colours
+    PURPLE     = colors.HexColor("#3a3a5c")
+    LIGHT_BLUE = colors.HexColor("#eef4fb")
+    BORDER     = colors.HexColor("#b0cce8")
+    GREEN_BG   = colors.HexColor("#f0fff0")
+    GREEN_BD   = colors.HexColor("#5a7a5c")
+    GREY       = colors.HexColor("#555555")
+    WHITE      = colors.white
+
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=2*cm, rightMargin=2*cm,
+        topMargin=2*cm, bottomMargin=2*cm,
+    )
+    W = A4[0] - 4*cm   # usable width
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle("title", fontSize=20, textColor=PURPLE,
+                                  spaceAfter=4, fontName="Helvetica-Bold",
+                                  alignment=TA_CENTER)
+    sub_style   = ParagraphStyle("sub",   fontSize=11, textColor=GREY,
+                                  spaceAfter=2, fontName="Helvetica",
+                                  alignment=TA_CENTER)
+    h2_style    = ParagraphStyle("h2",    fontSize=14, textColor=PURPLE,
+                                  spaceBefore=14, spaceAfter=6,
+                                  fontName="Helvetica-Bold")
+    h3_style    = ParagraphStyle("h3",    fontSize=12, textColor=PURPLE,
+                                  spaceBefore=10, spaceAfter=4,
+                                  fontName="Helvetica-Bold")
+    body_style  = ParagraphStyle("body",  fontSize=10, textColor=GREY,
+                                  spaceAfter=4, fontName="Helvetica",
+                                  leading=15)
+    bold_style  = ParagraphStyle("bold",  fontSize=10, textColor=PURPLE,
+                                  spaceAfter=2, fontName="Helvetica-Bold")
+    small_style = ParagraphStyle("small", fontSize=9,  textColor=GREY,
+                                  spaceAfter=2, fontName="Helvetica")
+
+    story = []
+
+    # ── Header ──────────────────────────────────────────────────────────
+    if os.path.exists(LOGO_PATH):
+        logo = RLImage(LOGO_PATH, width=2.5*cm, height=2.5*cm)
+        story.append(logo)
+        story.append(Spacer(1, 0.3*cm))
+
+    story.append(Paragraph("Filix Medtech", title_style))
+    story.append(Paragraph("NIR Spectrum Analysis Report", sub_style))
+    story.append(Spacer(1, 0.2*cm))
+    story.append(HRFlowable(width="100%", thickness=2, color=PURPLE))
+    story.append(Spacer(1, 0.3*cm))
+
+    # Date & info
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    info_data = [
+        ["Reference Medicine:", med_name,  "Date:", now],
+        ["Sample File:",        sample_name, "", ""],
+    ]
+    info_table = Table(info_data, colWidths=[3.5*cm, 6*cm, 2*cm, 5*cm])
+    info_table.setStyle(TableStyle([
+        ("FONTNAME",  (0,0), (-1,-1), "Helvetica"),
+        ("FONTNAME",  (0,0), (0,-1),  "Helvetica-Bold"),
+        ("FONTNAME",  (2,0), (2,-1),  "Helvetica-Bold"),
+        ("FONTSIZE",  (0,0), (-1,-1), 10),
+        ("TEXTCOLOR", (0,0), (-1,-1), GREY),
+        ("TEXTCOLOR", (0,0), (0,-1),  PURPLE),
+        ("TEXTCOLOR", (2,0), (2,-1),  PURPLE),
+        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+    ]))
+    story.append(info_table)
+    story.append(Spacer(1, 0.4*cm))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
+
+    # ── Spectra ──────────────────────────────────────────────────────────
+    story.append(Paragraph("Spectrum Graphs", h2_style))
+
+    story.append(Paragraph(f"Reference Spectrum — {med_name}", h3_style))
+    ref_img = RLImage(io.BytesIO(fig_ref_bytes), width=W, height=W*0.38)
+    story.append(ref_img)
+    story.append(Spacer(1, 0.3*cm))
+
+    story.append(Paragraph(f"Sample Spectrum — {sample_name}", h3_style))
+    smp_img = RLImage(io.BytesIO(fig_sample_bytes), width=W, height=W*0.38)
+    story.append(smp_img)
+    story.append(Spacer(1, 0.4*cm))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
+
+    # ── Analysis Results ─────────────────────────────────────────────────
+    story.append(Paragraph("Analysis Results", h2_style))
+
+    # Degree table
+    if lang == "en":
+        hdr = ["Degree", "Adj. R²", "R²", "Adj.R²/R² (%)"]
+    else:
+        hdr = ["階數", "Adj. R²", "R²", "Adj.R²/R² (%)"]
+    tbl_data = [hdr]
+    for row in res["table"]:
+        tbl_data.append([
+            str(row["degree"]),
+            f"{row['Adj. R²']:.6f}",
+            f"{row['R²']:.6f}",
+            f"{row['Adj.R²/R² (%)']:.4f}",
+        ])
+    col_w = W / 4
+    deg_table = Table(tbl_data, colWidths=[col_w]*4)
+    deg_table.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,0),  PURPLE),
+        ("TEXTCOLOR",    (0,0), (-1,0),  WHITE),
+        ("FONTNAME",     (0,0), (-1,0),  "Helvetica-Bold"),
+        ("FONTNAME",     (0,1), (-1,-1), "Helvetica"),
+        ("FONTSIZE",     (0,0), (-1,-1), 10),
+        ("ALIGN",        (0,0), (-1,-1), "CENTER"),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1), [WHITE, LIGHT_BLUE]),
+        ("GRID",         (0,0), (-1,-1), 0.5, BORDER),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 6),
+        ("TOPPADDING",   (0,0), (-1,-1), 6),
+    ]))
+    story.append(deg_table)
+    story.append(Spacer(1, 0.4*cm))
+
+    # Key metrics
+    sim = res["similarity"]
+    metrics = [
+        ["Chosen Best Degree",    str(res["best_degree"])],
+        ["Best Degree Ratio",     f"{res['best_ratio']:.4f} %"],
+        ["Self Accuracy (R²)",    f"{res['self_acc']:.6f}"],
+        ["Test Accuracy (R²)",    f"{res['test_acc']:.6f}"],
+        ["Similarity",            f"{sim:.4f} %"],
+    ]
+    met_table = Table(metrics, colWidths=[W*0.5, W*0.5])
+    met_table.setStyle(TableStyle([
+        ("FONTNAME",     (0,0), (0,-1),  "Helvetica-Bold"),
+        ("FONTNAME",     (1,0), (1,-1),  "Helvetica"),
+        ("FONTSIZE",     (0,0), (-1,-1), 10),
+        ("TEXTCOLOR",    (0,0), (0,-1),  PURPLE),
+        ("TEXTCOLOR",    (1,0), (1,-1),  GREY),
+        ("ROWBACKGROUNDS",(0,0),(-1,-1), [WHITE, LIGHT_BLUE]),
+        ("GRID",         (0,0), (-1,-1), 0.5, BORDER),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 6),
+        ("TOPPADDING",   (0,0), (-1,-1), 6),
+        ("ALIGN",        (1,0), (1,-1),  "RIGHT"),
+    ]))
+    story.append(met_table)
+    story.append(Spacer(1, 0.3*cm))
+
+    # Similarity highlight box
+    sim_data = [[f"Similarity: {sim:.2f}%"]]
+    sim_table = Table(sim_data, colWidths=[W])
+    sim_table.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,-1), GREEN_BG),
+        ("TEXTCOLOR",    (0,0), (-1,-1), GREEN_BD),
+        ("FONTNAME",     (0,0), (-1,-1), "Helvetica-Bold"),
+        ("FONTSIZE",     (0,0), (-1,-1), 16),
+        ("ALIGN",        (0,0), (-1,-1), "CENTER"),
+        ("BOX",          (0,0), (-1,-1), 1.5, GREEN_BD),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 12),
+        ("TOPPADDING",   (0,0), (-1,-1), 12),
+    ]))
+    story.append(sim_table)
+    story.append(Spacer(1, 0.4*cm))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
+
+    # ── How to Read ──────────────────────────────────────────────────────
+    story.append(PageBreak())
+    story.append(Paragraph("How to Read These Results", h2_style))
+    story.append(Spacer(1, 0.2*cm))
+
+    for exp_title, exp_desc in explanations:
+        # Strip emoji for PDF (reportlab doesn't support emoji)
+        clean_title = exp_title.encode("ascii", "ignore").decode().strip()
+        if not clean_title:
+            clean_title = exp_title[2:].strip()
+        story.append(Paragraph(clean_title, bold_style))
+        for line in exp_desc.split("\n"):
+            line = line.strip()
+            if line:
+                story.append(Paragraph(line, body_style))
+        story.append(Spacer(1, 0.2*cm))
+
+    story.append(Spacer(1, 0.4*cm))
+    story.append(HRFlowable(width="100%", thickness=1, color=PURPLE))
+    story.append(Spacer(1, 0.2*cm))
+    story.append(Paragraph("Generated by Filix Medtech NIR Spectrum Viewer", small_style))
+
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
 # ─────────────────────────────────────────────
 #  Page config & CSS
 # ─────────────────────────────────────────────
@@ -448,3 +657,39 @@ elif st.session_state.page == "detail":
                     st.markdown(f"**{title}**")
                     st.markdown(desc)
                     st.markdown("---")
+
+            # ── PDF Download ──────────────────────────────────────────
+            st.markdown("---")
+            with st.spinner("📄 Preparing PDF report…"):
+                try:
+                    # Re-generate figures as bytes for PDF
+                    px2, int2 = load_spectrum(MEDICINES[name]["csv"])
+                    fig_r2 = make_spectrum_fig(px2, int2,
+                                               f"{name} — Pixel vs. Intensity", "purple")
+                    ref_bytes = fig_to_bytes(fig_r2); plt.close(fig_r2)
+
+                    u_px2, u_int2 = load_spectrum(st.session_state.upload_bytes, from_bytes=True)
+                    sample_label  = uploaded.name if uploaded else "Sample"
+                    fig_u2 = make_spectrum_fig(u_px2, u_int2,
+                                               f"{sample_label} — Pixel vs. Intensity", "darkorange")
+                    smp_bytes = fig_to_bytes(fig_u2); plt.close(fig_u2)
+
+                    pdf_bytes = generate_pdf(
+                        med_name       = name,
+                        sample_name    = sample_label,
+                        fig_ref_bytes  = ref_bytes,
+                        fig_sample_bytes = smp_bytes,
+                        res            = res,
+                        explanations   = S["explanations"],
+                        lang           = st.session_state.lang,
+                    )
+                    fname = f"filix_report_{name.replace(' ','_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                    st.download_button(
+                        label     = "📥 Download PDF Report",
+                        data      = pdf_bytes,
+                        file_name = fname,
+                        mime      = "application/pdf",
+                        key       = "pdf_download",
+                    )
+                except Exception as e:
+                    st.error(f"Could not generate PDF: {e}")
