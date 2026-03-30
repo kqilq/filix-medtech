@@ -17,6 +17,8 @@ import json
 import datetime
 import io
 import base64
+import hashlib
+import uuid
 
 # ─────────────────────────────────────────────
 #  Paths & registry
@@ -184,62 +186,75 @@ STRINGS = {
 }
 
 # ─────────────────────────────────────────────
-#  localStorage — proper bidirectional custom component
+#  Per-device persistent storage
 #
-#  Uses ls_component/index.html which implements the Streamlit
-#  component protocol. This allows Python to both READ and WRITE
-#  browser localStorage reliably on every device.
+#  Strategy: use st.cache_resource (server-side in-memory dict) keyed by
+#  a device_id stored in the browser via a cookie.
+#  The cookie is set once via JS and read back via st.query_params on the
+#  next render. This is reliable because:
+#  - st.cache_resource persists as long as the Streamlit server is running
+#  - The cookie persists in the browser indefinitely
+#  - Each device gets a unique UUID stored in its cookie
+#
+#  Note: st.cache_resource resets if Streamlit Cloud restarts (redeploy).
+#  For truly permanent storage a database would be needed, but this is
+#  the most reliable approach without a backend database.
 # ─────────────────────────────────────────────
-LS_KEY = "filix_user_medicines"
-_LS_COMPONENT_DIR = os.path.join(BASE_DIR, "ls_component")
-_ls_component = st.components.v1.declare_component(
-    "ls_component", path=_LS_COMPONENT_DIR
-)
 
-def db_to_json(db):
-    out = {}
-    for name, info in db.items():
-        out[name] = {
-            "b64":      base64.b64encode(info["bytes"]).decode(),
-            "filename": info.get("filename", ""),
-            "added":    info.get("added", ""),
-        }
-    return json.dumps(out, ensure_ascii=False)
+@st.cache_resource
+def _get_global_store():
+    """Global in-memory store: {device_id: {med_name: {bytes, filename, added}}}"""
+    return {}
 
-def db_from_json(s):
-    db = {}
-    if not s:
-        return db
-    try:
-        stored = json.loads(s)
-        for name, info in stored.items():
-            db[name] = {
-                "bytes":    base64.b64decode(info["b64"]),
-                "filename": info.get("filename", ""),
-                "added":    info.get("added", ""),
-            }
-    except Exception:
-        pass
-    return db
+def get_user_db(device_id: str) -> dict:
+    store = _get_global_store()
+    if device_id not in store:
+        store[device_id] = {}
+    return store[device_id]
 
-# Counter to ensure each component call gets a unique Streamlit key
-if "ls_call_count" not in st.session_state:
-    st.session_state.ls_call_count = 0
+def save_user_db(device_id: str, db: dict):
+    store = _get_global_store()
+    store[device_id] = db
 
-def _next_ls_key():
-    st.session_state.ls_call_count += 1
-    return f"_ls_{st.session_state.ls_call_count}"
+# ─────────────────────────────────────────────
+#  Device ID via cookie + query param
+# ─────────────────────────────────────────────
+COOKIE_NAME = "filix_device_id"
 
-def ls_read():
-    """Read from browser localStorage. Returns JSON string or ''."""
-    result = _ls_component(action="read", lskey=LS_KEY, default="",
-                           key=_next_ls_key())
-    return result or ""
-
-def ls_write(db):
-    """Write db to browser localStorage."""
-    _ls_component(action="write", lskey=LS_KEY, value=db_to_json(db), default="",
-                  key=_next_ls_key())
+def _inject_cookie_reader():
+    """
+    Inject JS that reads the device_id cookie and appends it to the URL
+    as ?_did=... so Python can read it on the next render.
+    Also sets the cookie if it doesn't exist yet.
+    """
+    st.components.v1.html(f"""
+        <script>
+        (function() {{
+            function getCookie(name) {{
+                var m = document.cookie.match('(?:^|;)\\\\s*' + name + '=([^;]*)');
+                return m ? decodeURIComponent(m[1]) : null;
+            }}
+            function setCookie(name, val, days) {{
+                var exp = new Date(Date.now() + days*864e5).toUTCString();
+                document.cookie = name + '=' + encodeURIComponent(val) +
+                    '; expires=' + exp + '; path=/; SameSite=Lax';
+            }}
+            var did = getCookie('{COOKIE_NAME}');
+            if (!did) {{
+                did = 'dev_' + Math.random().toString(36).slice(2) +
+                      Math.random().toString(36).slice(2);
+                setCookie('{COOKIE_NAME}', did, 3650);
+            }}
+            var url = new URL(window.parent.location.href);
+            if (url.searchParams.get('_did') !== did) {{
+                url.searchParams.set('_did', did);
+                window.parent.history.replaceState(null, '', url.toString());
+                // Trigger Streamlit rerun by posting a message
+                window.parent.dispatchEvent(new Event('popstate'));
+            }}
+        }})();
+        </script>
+    """, height=0)
 
 # ─────────────────────────────────────────────
 #  Data helpers
@@ -401,6 +416,19 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
+#  Device ID resolution
+#  1. Inject JS to set cookie + put ?_did=... in URL
+#  2. Read ?_did from query params → device_id
+# ─────────────────────────────────────────────
+_inject_cookie_reader()
+
+device_id = st.query_params.get("_did", "")
+if not device_id:
+    # No device_id yet — JS hasn't run yet. Show a loading message and stop.
+    st.info("Loading your profile… please wait a moment.")
+    st.stop()
+
+# ─────────────────────────────────────────────
 #  Session state initialisation
 # ─────────────────────────────────────────────
 if "lang"         not in st.session_state: st.session_state.lang         = "en"
@@ -409,23 +437,9 @@ if "selected_med" not in st.session_state: st.session_state.selected_med = None
 if "upload_bytes" not in st.session_state: st.session_state.upload_bytes = None
 if "upload_name"  not in st.session_state: st.session_state.upload_name  = None
 if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
-if "user_db"      not in st.session_state: st.session_state.user_db      = {}
-if "ls_loaded"    not in st.session_state: st.session_state.ls_loaded    = False
 
-# ── Load from localStorage via bidirectional custom component ─────────────
-# The component reads localStorage and returns the value to Python.
-# On first render it may return "" (component not yet ready), so we
-# call ls_read() on every render until we get a non-empty result or
-# confirm there is nothing stored.
-if not st.session_state.ls_loaded:
-    raw = ls_read()
-    if raw and raw != "ok":
-        loaded = db_from_json(raw)
-        if loaded:
-            st.session_state.user_db = loaded
-        st.session_state.ls_loaded = True
-    # If raw is "" the component hasn't responded yet — it will on next rerun.
-    # We don't set ls_loaded=True so we keep trying each render.
+# user_db is always loaded fresh from the global store (keyed by device_id)
+user_db = get_user_db(device_id)
 
 S = STRINGS[st.session_state.lang]
 
@@ -522,7 +536,6 @@ elif st.session_state.page == "detail":
 
     uploaded = st.file_uploader(S["upload_btn"], type=["csv"], key="uploader")
 
-    user_db = st.session_state.user_db
     if user_db:
         st.markdown(f"**{S['from_saved']}**")
         saved_names  = list(user_db.keys())
@@ -549,8 +562,7 @@ elif st.session_state.page == "detail":
                 "filename": uploaded.name,
                 "added":    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             }
-            st.session_state.user_db     = user_db
-            ls_write(user_db)            # persist to browser localStorage
+            save_user_db(device_id, user_db)   # persist to server-side cache
             st.session_state.upload_name  = final_name
             st.session_state.analysis_res = None
             st.success(f"{S['name_saved']} **{final_name}**")
@@ -616,7 +628,6 @@ elif st.session_state.page == "your_medicines":
     st.markdown(f"## {S['your_med_title']}")
     st.markdown("---")
 
-    user_db = st.session_state.user_db
     if not user_db:
         st.info(S["no_saved_msg"])
     else:
@@ -642,6 +653,5 @@ elif st.session_state.page == "your_medicines":
                 st.markdown("---")
         if to_delete:
             del user_db[to_delete]
-            st.session_state.user_db = user_db
-            ls_write(user_db)        # persist deletion to browser localStorage
+            save_user_db(device_id, user_db)   # persist deletion
             st.rerun()
