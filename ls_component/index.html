@@ -3,7 +3,8 @@
 <head><meta charset="utf-8"></head>
 <body>
 <script>
-  // Streamlit custom component protocol
+  var _sent = false;
+
   function sendValue(val) {
     window.parent.postMessage({
       type: "streamlit:setComponentValue",
@@ -13,25 +14,30 @@
 
   function onRender(event) {
     if (event.data.type !== "streamlit:render") return;
-    var args    = event.data.args;
-    var action  = args.action;
-    var lskey   = args.lskey;   // renamed from "key" to avoid Streamlit conflict
+    if (_sent) return;  // only send once per render
 
-    if (action === "read") {
-      var val = localStorage.getItem(lskey) || "";
-      sendValue(val);
-    } else if (action === "write") {
-      localStorage.setItem(lskey, args.value);
-      sendValue("ok");
-    } else if (action === "delete") {
-      localStorage.removeItem(lskey);
+    var args   = event.data.args || {};
+    var action = args.action || "get_did";
+    var lsKey  = args.lskey  || "filix_device_id";
+
+    if (action === "get_did") {
+      // Read or create device ID from localStorage, return it to Python
+      var did = null;
+      try { did = localStorage.getItem(lsKey); } catch(e) {}
+      if (!did) {
+        did = 'dev_' + Math.random().toString(36).slice(2,10) +
+                       Math.random().toString(36).slice(2,10);
+        try { localStorage.setItem(lsKey, did); } catch(e) {}
+      }
+      _sent = true;
+      sendValue(did);
+    } else if (action === "noop") {
+      _sent = true;
       sendValue("ok");
     }
   }
 
   window.addEventListener("message", onRender);
-
-  // Tell Streamlit we're ready
   window.parent.postMessage({ type: "streamlit:componentReady", apiVersion: 1 }, "*");
 </script>
 </body>
