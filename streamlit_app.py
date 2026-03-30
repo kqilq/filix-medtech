@@ -24,6 +24,8 @@ from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
                                  Image as RLImage, Table, TableStyle,
                                  HRFlowable, KeepTogether)
 from reportlab.platypus import PageBreak
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 # ─────────────────────────────────────────────
 #  Paths & registry
@@ -275,6 +277,66 @@ def fig_to_bytes(fig):
     buf.seek(0)
     return buf.read()
 
+def _pdf_safe(text):
+    """Replace Unicode chars that Helvetica can't render with ASCII equivalents."""
+    replacements = {
+        "\u00b2": "2",        # superscript 2 → 2
+        "\u00b2": "2",
+        "\u2013": "-",        # en dash → -
+        "\u2014": "--",       # em dash → --
+        "\u2192": "->",       # → arrow
+        "\u00f7": "/",        # division sign
+        "\u2248": "~",        # approximately
+        "\u2260": "!=",       # not equal
+        "\u2264": "<=",       # less or equal
+        "\u2265": ">=",       # greater or equal
+        "\u00d7": "x",        # multiplication sign
+        "\u2019": "'",        # right single quote
+        "\u2018": "'",        # left single quote
+        "\u201c": '"',        # left double quote
+        "\u201d": '"',        # right double quote
+        "\u2026": "...",      # ellipsis
+        "\u00e9": "e",        # e acute
+        "\u00e0": "a",        # a grave
+        "\u00fc": "u",        # u umlaut
+        "\uff08": "(",        # fullwidth (
+        "\uff09": ")",        # fullwidth )
+    }
+    for uni, asc in replacements.items():
+        text = text.replace(uni, asc)
+    # Remove any remaining non-latin1 characters
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+# PDF-safe explanation strings (ASCII only, no emoji)
+PDF_EXPLANATIONS_EN = [
+    ("Polynomial Degree",
+     "The spectrum curve is fitted using a polynomial equation. A higher degree means a more complex curve. "
+     "The table shows all degrees that gave statistically significant fits (p < 0.001 for all terms)."),
+    ("Adjusted R2 (Adj. R2)",
+     "Measures how well the polynomial fits the reference spectrum, penalising unnecessary complexity. "
+     "Closer to 1.0 = better fit. This is used to select the best degree."),
+    ("R2 (R-squared)",
+     "The basic goodness-of-fit score - the proportion of variance in the spectrum explained by the polynomial. "
+     "1.0 = perfect fit, 0 = no fit at all."),
+    ("Adj. R2 / R2 (%)",
+     "The ratio of Adjusted R2 to R2, expressed as a percentage. The best degree is the one where this ratio "
+     "is closest to 100% - meaning the model is neither over-fitted nor under-fitted."),
+    ("Chosen Best Degree",
+     "The polynomial degree whose Adj. R2/R2 ratio is closest to 100%. This is the most balanced model - "
+     "complex enough to capture the spectrum shape, but not so complex that it overfits noise."),
+    ("Self Accuracy (R2)",
+     "How well the chosen polynomial model fits the reference medicine's own spectrum. "
+     "This is the baseline - ideally very close to 1.0."),
+    ("Test Accuracy (R2)",
+     "How well the same model fits your uploaded sample's spectrum. A value close to the Self Accuracy "
+     "means your sample behaves similarly to the reference."),
+    ("Similarity (%)",
+     "Test Accuracy / Self Accuracy x 100. This is the key result:\n"
+     "- ~100%: your sample is very similar to the reference medicine\n"
+     "- Much lower: the spectra differ significantly\n"
+     "- Can exceed 100% if your sample fits the model even better than the reference"),
+]
+
 def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, explanations, lang="en"):
     """Generate a nicely formatted PDF report and return as bytes."""
     buf = io.BytesIO()
@@ -355,12 +417,12 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     # ── Spectra ──────────────────────────────────────────────────────────
     story.append(Paragraph("Spectrum Graphs", h2_style))
 
-    story.append(Paragraph(f"Reference Spectrum — {med_name}", h3_style))
+    story.append(Paragraph(_pdf_safe(f"Reference Spectrum - {med_name}"), h3_style))
     ref_img = RLImage(io.BytesIO(fig_ref_bytes), width=W, height=W*0.38)
     story.append(ref_img)
     story.append(Spacer(1, 0.3*cm))
 
-    story.append(Paragraph(f"Sample Spectrum — {sample_name}", h3_style))
+    story.append(Paragraph(_pdf_safe(f"Sample Spectrum - {sample_name}"), h3_style))
     smp_img = RLImage(io.BytesIO(fig_sample_bytes), width=W, height=W*0.38)
     story.append(smp_img)
     story.append(Spacer(1, 0.4*cm))
@@ -370,18 +432,15 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     story.append(PageBreak())
     story.append(Paragraph("Analysis Results", h2_style))
 
-    # Degree table
-    if lang == "en":
-        hdr = ["Degree", "Adj. R²", "R²", "Adj.R²/R² (%)"]
-    else:
-        hdr = ["階數", "Adj. R²", "R²", "Adj.R²/R² (%)"]
+    # Degree table — use ASCII-safe headers
+    hdr = ["Degree", "Adj. R2", "R2", "Adj.R2/R2 (%)"]
     tbl_data = [hdr]
     for row in res["table"]:
         tbl_data.append([
             str(row["degree"]),
-            f"{row['Adj. R²']:.6f}",
-            f"{row['R²']:.6f}",
-            f"{row['Adj.R²/R² (%)']:.4f}",
+            f"{row['Adj. R\u00b2']:.6f}",
+            f"{row['R\u00b2']:.6f}",
+            f"{row['Adj.R\u00b2/R\u00b2 (%)']:.4f}",
         ])
     col_w = W / 4
     deg_table = Table(tbl_data, colWidths=[col_w]*4)
@@ -400,14 +459,14 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     story.append(deg_table)
     story.append(Spacer(1, 0.4*cm))
 
-    # Key metrics
+    # Key metrics — ASCII safe
     sim = res["similarity"]
     metrics = [
-        ["Chosen Best Degree",    str(res["best_degree"])],
-        ["Best Degree Ratio",     f"{res['best_ratio']:.4f} %"],
-        ["Self Accuracy (R²)",    f"{res['self_acc']:.6f}"],
-        ["Test Accuracy (R²)",    f"{res['test_acc']:.6f}"],
-        ["Similarity",            f"{sim:.4f} %"],
+        ["Chosen Best Degree",  str(res["best_degree"])],
+        ["Best Degree Ratio",   f"{res['best_ratio']:.4f} %"],
+        ["Self Accuracy (R2)",  f"{res['self_acc']:.6f}"],
+        ["Test Accuracy (R2)",  f"{res['test_acc']:.6f}"],
+        ["Similarity",          f"{sim:.4f} %"],
     ]
     met_table = Table(metrics, colWidths=[W*0.5, W*0.5])
     met_table.setStyle(TableStyle([
@@ -442,19 +501,15 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     story.append(Spacer(1, 0.4*cm))
     story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
 
-    # ── How to Read ──────────────────────────────────────────────────────
+    # ── How to Read — always use PDF_EXPLANATIONS_EN (ASCII safe) ────────
     story.append(PageBreak())
     story.append(Paragraph("How to Read These Results", h2_style))
     story.append(Spacer(1, 0.2*cm))
 
-    for exp_title, exp_desc in explanations:
-        # Strip emoji for PDF (reportlab doesn't support emoji)
-        clean_title = exp_title.encode("ascii", "ignore").decode().strip()
-        if not clean_title:
-            clean_title = exp_title[2:].strip()
-        story.append(Paragraph(clean_title, bold_style))
+    for exp_title, exp_desc in PDF_EXPLANATIONS_EN:
+        story.append(Paragraph(_pdf_safe(exp_title), bold_style))
         for line in exp_desc.split("\n"):
-            line = line.strip()
+            line = _pdf_safe(line.strip())
             if line:
                 story.append(Paragraph(line, body_style))
         story.append(Spacer(1, 0.2*cm))
