@@ -13,20 +13,14 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use("Agg")
 import os
-import json
 import datetime
 import io
-import base64
-import hashlib
-import uuid
 
 # ─────────────────────────────────────────────
 #  Paths & registry
 # ─────────────────────────────────────────────
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(BASE_DIR, "filix_logo.png")
-if not os.path.exists(LOGO_PATH):
-    LOGO_PATH = "/Users/kaila/Downloads/Filix-Medtech-logo_final-02.png"
 
 MEDICINES = {
     "Medicine 1": {
@@ -184,76 +178,6 @@ STRINGS = {
         ],
     },
 }
-
-# ─────────────────────────────────────────────
-#  Per-device persistent storage
-#
-#  Strategy: use st.cache_resource (server-side in-memory dict) keyed by
-#  a device_id stored in the browser via a cookie.
-#  The cookie is set once via JS and read back via st.query_params on the
-#  next render. This is reliable because:
-#  - st.cache_resource persists as long as the Streamlit server is running
-#  - The cookie persists in the browser indefinitely
-#  - Each device gets a unique UUID stored in its cookie
-#
-#  Note: st.cache_resource resets if Streamlit Cloud restarts (redeploy).
-#  For truly permanent storage a database would be needed, but this is
-#  the most reliable approach without a backend database.
-# ─────────────────────────────────────────────
-
-@st.cache_resource
-def _get_global_store():
-    """Global in-memory store: {device_id: {med_name: {bytes, filename, added}}}"""
-    return {}
-
-def get_user_db(device_id: str) -> dict:
-    store = _get_global_store()
-    if device_id not in store:
-        store[device_id] = {}
-    return store[device_id]
-
-def save_user_db(device_id: str, db: dict):
-    store = _get_global_store()
-    store[device_id] = db
-
-# ─────────────────────────────────────────────
-#  Device ID via cookie + query param
-# ─────────────────────────────────────────────
-COOKIE_NAME = "filix_device_id"
-
-def _inject_cookie_js():
-    """
-    Inject JS that reads/creates the device_id cookie and writes it
-    into the URL as ?_did=... then reloads the page so Streamlit picks it up.
-    Only runs when ?_did is not already in the URL.
-    """
-    st.components.v1.html(f"""
-        <script>
-        (function() {{
-            function getCookie(name) {{
-                var m = document.cookie.match('(?:^|;)\\\\s*' + name + '=([^;]*)');
-                return m ? decodeURIComponent(m[1]) : null;
-            }}
-            function setCookie(name, val, days) {{
-                var exp = new Date(Date.now() + days*864e5).toUTCString();
-                document.cookie = name + '=' + encodeURIComponent(val) +
-                    '; expires=' + exp + '; path=/; SameSite=Lax';
-            }}
-            var did = getCookie('{COOKIE_NAME}');
-            if (!did) {{
-                did = 'dev_' + Math.random().toString(36).slice(2) +
-                      Math.random().toString(36).slice(2);
-                setCookie('{COOKIE_NAME}', did, 3650);
-            }}
-            var url = new URL(window.parent.location.href);
-            if (url.searchParams.get('_did') !== did) {{
-                url.searchParams.set('_did', did);
-                // Hard reload so Streamlit sees the new query param
-                window.parent.location.replace(url.toString());
-            }}
-        }})();
-        </script>
-    """, height=0)
 
 # ─────────────────────────────────────────────
 #  Data helpers
@@ -415,20 +339,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  Device ID resolution
-#  1. Inject JS to set cookie + put ?_did=... in URL
-#  2. Read ?_did from query params → device_id
-# ─────────────────────────────────────────────
-_inject_cookie_js()
-
-device_id = st.query_params.get("_did", "")
-if not device_id:
-    # No device_id yet — JS hasn't run yet. Show a loading message and stop.
-    st.info("Loading your profile… please wait a moment.")
-    st.stop()
-
-# ─────────────────────────────────────────────
-#  Session state initialisation
+#  Session state — loads immediately, no JS needed
 # ─────────────────────────────────────────────
 if "lang"         not in st.session_state: st.session_state.lang         = "en"
 if "page"         not in st.session_state: st.session_state.page         = "home"
@@ -436,9 +347,7 @@ if "selected_med" not in st.session_state: st.session_state.selected_med = None
 if "upload_bytes" not in st.session_state: st.session_state.upload_bytes = None
 if "upload_name"  not in st.session_state: st.session_state.upload_name  = None
 if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
-
-# user_db is always loaded fresh from the global store (keyed by device_id)
-user_db = get_user_db(device_id)
+if "user_db"      not in st.session_state: st.session_state.user_db      = {}
 
 S = STRINGS[st.session_state.lang]
 
@@ -535,6 +444,7 @@ elif st.session_state.page == "detail":
 
     uploaded = st.file_uploader(S["upload_btn"], type=["csv"], key="uploader")
 
+    user_db = st.session_state.user_db
     if user_db:
         st.markdown(f"**{S['from_saved']}**")
         saved_names  = list(user_db.keys())
@@ -556,12 +466,11 @@ elif st.session_state.page == "detail":
         chosen_name = st.text_input(S["name_prompt"], value=default_name, key="name_input")
         if st.button(S["save_btn"], key="save_analyse_btn"):
             final_name = chosen_name.strip() if chosen_name.strip() else default_name
-            user_db[final_name] = {
+            st.session_state.user_db[final_name] = {
                 "bytes":    file_bytes,
                 "filename": uploaded.name,
                 "added":    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             }
-            save_user_db(device_id, user_db)   # persist to server-side cache
             st.session_state.upload_name  = final_name
             st.session_state.analysis_res = None
             st.success(f"{S['name_saved']} **{final_name}**")
@@ -627,6 +536,7 @@ elif st.session_state.page == "your_medicines":
     st.markdown(f"## {S['your_med_title']}")
     st.markdown("---")
 
+    user_db = st.session_state.user_db
     if not user_db:
         st.info(S["no_saved_msg"])
     else:
@@ -651,6 +561,5 @@ elif st.session_state.page == "your_medicines":
                         st.error(str(e))
                 st.markdown("---")
         if to_delete:
-            del user_db[to_delete]
-            save_user_db(device_id, user_db)   # persist deletion
+            del st.session_state.user_db[to_delete]
             st.rerun()
