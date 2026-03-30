@@ -184,16 +184,17 @@ STRINGS = {
 }
 
 # ─────────────────────────────────────────────
-#  localStorage — pure JS bidirectional component
+#  localStorage — proper bidirectional custom component
 #
-#  Strategy:
-#  1. On every page load, a hidden JS snippet reads localStorage and
-#     posts the value into a Streamlit text_input (via DOM manipulation).
-#  2. We use st.components.v1.html to WRITE to localStorage whenever
-#     the db changes (fire-and-forget, no return value needed).
-#  3. Reading is done via a custom component that returns a value to Python.
+#  Uses ls_component/index.html which implements the Streamlit
+#  component protocol. This allows Python to both READ and WRITE
+#  browser localStorage reliably on every device.
 # ─────────────────────────────────────────────
 LS_KEY = "filix_user_medicines"
+_LS_COMPONENT_DIR = os.path.join(BASE_DIR, "ls_component")
+_ls_component = st.components.v1.declare_component(
+    "ls_component", path=_LS_COMPONENT_DIR
+)
 
 def db_to_json(db):
     out = {}
@@ -221,44 +222,14 @@ def db_from_json(s):
         pass
     return db
 
-def ls_write(db):
-    """Write db to browser localStorage (fire-and-forget JS)."""
-    payload = db_to_json(db)
-    # JSON-encode the payload so it's safe to embed in JS
-    js_payload = json.dumps(payload)   # this double-encodes: Python str → JS string literal
-    st.components.v1.html(
-        f"<script>localStorage.setItem({json.dumps(LS_KEY)}, {js_payload});</script>",
-        height=0,
-    )
-
 def ls_read():
-    """
-    Read from browser localStorage using a Streamlit component.
-    Returns the stored JSON string, or "" if nothing saved.
-    This uses st.components.v1.declare_component pattern via html+postMessage.
-    Because st.components.v1.html cannot return values, we use a workaround:
-    store the value in a hidden query param via JS, then read it server-side.
-    """
-    # We inject JS that reads localStorage and appends it to the URL as ?_ls=...
-    # then Streamlit reads st.query_params["_ls"]
-    # This only runs once per session (before ls_loaded is set).
-    st.components.v1.html(f"""
-        <script>
-        (function() {{
-            var val = localStorage.getItem({json.dumps(LS_KEY)}) || "";
-            if (val) {{
-                // Post to parent Streamlit frame to set query param
-                var url = new URL(window.parent.location.href);
-                if (!url.searchParams.get('_ls')) {{
-                    url.searchParams.set('_ls', encodeURIComponent(val));
-                    window.parent.history.replaceState(null, '', url.toString());
-                    // Trigger a rerun by dispatching a storage event
-                    window.parent.location.reload();
-                }}
-            }}
-        }})();
-        </script>
-    """, height=0)
+    """Read from browser localStorage. Returns JSON string or ''."""
+    result = _ls_component(action="read", key=LS_KEY, default="")
+    return result or ""
+
+def ls_write(db):
+    """Write db to browser localStorage."""
+    _ls_component(action="write", key=LS_KEY, value=db_to_json(db), default="")
 
 # ─────────────────────────────────────────────
 #  Data helpers
@@ -431,42 +402,20 @@ if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
 if "user_db"      not in st.session_state: st.session_state.user_db      = {}
 if "ls_loaded"    not in st.session_state: st.session_state.ls_loaded    = False
 
-# ── Load from localStorage via query param trick ──────────────────────────
-# On first load, JS writes localStorage value into ?_ls=... and reloads.
-# On second load, Python reads ?_ls and populates user_db.
+# ── Load from localStorage via bidirectional custom component ─────────────
+# The component reads localStorage and returns the value to Python.
+# On first render it may return "" (component not yet ready), so we
+# call ls_read() on every render until we get a non-empty result or
+# confirm there is nothing stored.
 if not st.session_state.ls_loaded:
-    qp = st.query_params
-    ls_val = qp.get("_ls", "")
-    if ls_val:
-        # Decode URL-encoded value
-        import urllib.parse
-        try:
-            decoded = urllib.parse.unquote(ls_val)
-            loaded  = db_from_json(decoded)
-            if loaded:
-                st.session_state.user_db  = loaded
-        except Exception:
-            pass
-        # Clear the query param so it doesn't stay in the URL
-        st.query_params.clear()
+    raw = ls_read()
+    if raw and raw != "ok":
+        loaded = db_from_json(raw)
+        if loaded:
+            st.session_state.user_db = loaded
         st.session_state.ls_loaded = True
-    else:
-        # Inject JS to read localStorage and reload with ?_ls=...
-        st.components.v1.html(f"""
-            <script>
-            (function() {{
-                var val = localStorage.getItem({json.dumps(LS_KEY)});
-                if (val && val.length > 2) {{
-                    var url = new URL(window.parent.location.href);
-                    if (!url.searchParams.get('_ls')) {{
-                        url.searchParams.set('_ls', encodeURIComponent(val));
-                        window.parent.location.replace(url.toString());
-                    }}
-                }}
-            }})();
-            </script>
-        """, height=0)
-        st.session_state.ls_loaded = True   # don't retry — if nothing in LS, start fresh
+    # If raw is "" the component hasn't responded yet — it will on next rerun.
+    # We don't set ls_loaded=True so we keep trying each render.
 
 S = STRINGS[st.session_state.lang]
 
