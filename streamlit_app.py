@@ -322,13 +322,14 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     if os.path.exists(LOGO_PATH):
         logo = RLImage(LOGO_PATH, width=2.5*cm, height=2.5*cm)
         story.append(logo)
-        story.append(Spacer(1, 0.3*cm))
+        story.append(Spacer(1, 0.5*cm))   # more space between logo and title
 
     story.append(Paragraph("Filix Medtech", title_style))
+    story.append(Spacer(1, 0.3*cm))       # space between title and subtitle
     story.append(Paragraph("NIR Spectrum Analysis Report", sub_style))
-    story.append(Spacer(1, 0.2*cm))
+    story.append(Spacer(1, 0.4*cm))
     story.append(HRFlowable(width="100%", thickness=2, color=PURPLE))
-    story.append(Spacer(1, 0.3*cm))
+    story.append(Spacer(1, 0.4*cm))
 
     # Date & info
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -365,7 +366,8 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     story.append(Spacer(1, 0.4*cm))
     story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
 
-    # ── Analysis Results ─────────────────────────────────────────────────
+    # ── Analysis Results (new page) ──────────────────────────────────────
+    story.append(PageBreak())
     story.append(Paragraph("Analysis Results", h2_style))
 
     # Degree table
