@@ -395,16 +395,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  Device ID — read from browser localStorage via declare_component.
-#  This is the only reliable cross-browser/mobile approach.
-#  The component returns the device ID to Python on every render.
-# ─────────────────────────────────────────────
-_ls_comp = st.components.v1.declare_component(
-    "ls_component",
-    path=os.path.join(BASE_DIR, "ls_component")
-)
-
-# ─────────────────────────────────────────────
 #  Session state — initialise immediately
 # ─────────────────────────────────────────────
 if "lang"         not in st.session_state: st.session_state.lang         = "en"
@@ -416,30 +406,32 @@ if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
 if "db_loaded"    not in st.session_state: st.session_state.db_loaded    = False
 if "user_db"      not in st.session_state: st.session_state.user_db      = {}
 if "device_id"    not in st.session_state: st.session_state.device_id    = ""
-if "did_rerun"    not in st.session_state: st.session_state.did_rerun    = False
 
-# Get device ID from browser localStorage via the component.
-# On the very first render the component returns "" (JS hasn't responded yet).
-# We trigger ONE rerun to give the component time to respond.
-raw_did = _ls_comp(action="get_did", lskey="filix_device_id",
-                   default="", key="did_reader")
-
-if raw_did and raw_did != st.session_state.device_id:
-    st.session_state.device_id = raw_did
-    st.session_state.db_loaded = False
-    st.session_state.did_rerun = False  # reset for next session
-
+# ─────────────────────────────────────────────
+#  User identity — simple name/PIN login
+#  The user enters a name (e.g. "kaila-phone") once.
+#  This is stored in session_state and used as the Supabase key.
+#  No JS, no cookies, no localStorage — works on every device.
+# ─────────────────────────────────────────────
 device_id = st.session_state.device_id
 
-# Load from Supabase once per session when device_id is available
+if not device_id:
+    # Show a compact login form in the sidebar
+    with st.sidebar:
+        st.markdown("### 🔑 Your Profile")
+        st.caption("Enter a name to save & retrieve your medicines across sessions.")
+        name_input = st.text_input("Your name / device name:", 
+                                    placeholder="e.g. kaila-phone",
+                                    key="login_name_input")
+        if st.button("Continue →", key="login_btn") and name_input.strip():
+            st.session_state.device_id = name_input.strip().lower().replace(" ", "-")
+            st.session_state.db_loaded = False
+            st.rerun()
+        st.info("💡 Use the same name on every device to access your saved medicines.")
+
 if device_id and not st.session_state.db_loaded:
     st.session_state.user_db   = db_load(device_id)
     st.session_state.db_loaded = True
-
-# Trigger ONE rerun if component hasn't responded yet (first render timing)
-if not device_id and not raw_did and not st.session_state.did_rerun:
-    st.session_state.did_rerun = True
-    st.rerun()
 
 S = STRINGS[st.session_state.lang]
 
