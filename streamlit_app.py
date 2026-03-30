@@ -307,6 +307,16 @@ def _pdf_safe(text):
     # Remove any remaining non-latin1 characters
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
+# ── Register Arial Unicode font for Chinese PDF support ──────────────────
+_ARIAL_UNICODE_PATH = os.path.join(BASE_DIR, "fonts", "ArialUnicode.ttf")
+_ARIAL_UNICODE_REGISTERED = False
+def _ensure_arial_unicode():
+    global _ARIAL_UNICODE_REGISTERED
+    if not _ARIAL_UNICODE_REGISTERED and os.path.exists(_ARIAL_UNICODE_PATH):
+        pdfmetrics.registerFont(TTFont("ArialUnicode", _ARIAL_UNICODE_PATH))
+        _ARIAL_UNICODE_REGISTERED = True
+    return _ARIAL_UNICODE_REGISTERED
+
 # PDF-safe explanation strings (ASCII only, no emoji)
 PDF_EXPLANATIONS_EN = [
     ("Polynomial Degree",
@@ -337,9 +347,68 @@ PDF_EXPLANATIONS_EN = [
      "- Can exceed 100% if your sample fits the model even better than the reference"),
 ]
 
+# Chinese PDF strings
+PDF_STRINGS_ZH = {
+    "report_title":    "近紅外光譜分析報告",
+    "ref_medicine":    "參考藥品：",
+    "date":            "日期：",
+    "sample_file":     "樣本檔案：",
+    "spectrum_graphs": "光譜圖",
+    "ref_spectrum":    "參考光譜 - ",
+    "sample_spectrum": "樣本光譜 - ",
+    "analysis":        "分析結果",
+    "degree":          "階數",
+    "adj_r2":          "Adj. R2",
+    "r2":              "R2",
+    "ratio":           "Adj.R2/R2 (%)",
+    "best_degree":     "最佳階數",
+    "best_ratio":      "最佳階數比率",
+    "self_acc":        "自身準確度 (R2)",
+    "test_acc":        "測試準確度 (R2)",
+    "similarity":      "相似度",
+    "sim_label":       "相似度：",
+    "how_to_read":     "如何解讀分析結果",
+    "footer":          "由 Filix Medtech 近紅外光譜檢視器生成",
+}
+
+PDF_EXPLANATIONS_ZH = [
+    ("多項式階數（Polynomial Degree）",
+     "光譜曲線以多項式方程式進行擬合。階數越高，曲線越複雜。"
+     "表格顯示所有統計上顯著的階數（所有項目 p < 0.001）。"),
+    ("調整後 R2（Adj. R2）",
+     "衡量多項式對參考光譜的擬合程度，並對不必要的複雜度進行懲罰。"
+     "越接近 1.0 表示擬合越好。此數值用於選擇最佳階數。"),
+    ("R2（決定係數）",
+     "基本擬合優度分數——多項式能解釋光譜變異的比例。"
+     "1.0 = 完美擬合，0 = 完全無法擬合。"),
+    ("Adj. R2 / R2 (%)",
+     "Adj. R2 與 R2 的比率，以百分比表示。"
+     "最佳階數是此比率最接近 100% 的那個——代表模型既不過度擬合也不欠擬合。"),
+    ("最佳階數",
+     "Adj. R2/R2 比率最接近 100% 的多項式階數。"
+     "這是最平衡的模型——足夠複雜以捕捉光譜形狀，但不會過度擬合雜訊。"),
+    ("自身準確度（R2）",
+     "所選多項式模型對參考藥品本身光譜的擬合程度。"
+     "這是基準值——理想情況下應非常接近 1.0。"),
+    ("測試準確度（R2）",
+     "相同模型對您上傳樣本光譜的擬合程度。"
+     "數值越接近自身準確度，表示您的樣本與參考藥品越相似。"),
+    ("相似度（%）",
+     "測試準確度 / 自身準確度 x 100。這是最關鍵的結果：\n"
+     "- 約 100%：您的樣本與參考藥品非常相似\n"
+     "- 遠低於 100%：光譜差異顯著\n"
+     "- 可能超過 100%（若您的樣本比參考藥品更符合模型）"),
+]
+
 def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, explanations, lang="en"):
     """Generate a nicely formatted PDF report and return as bytes."""
     buf = io.BytesIO()
+
+    # Use Arial Unicode for Chinese, Helvetica for English
+    use_zh = (lang == "zh") and _ensure_arial_unicode()
+    FONT_REG  = "ArialUnicode" if use_zh else "Helvetica"
+    FONT_BOLD = "ArialUnicode" if use_zh else "Helvetica-Bold"
+    ZH = PDF_STRINGS_ZH if use_zh else {}
 
     # Colours
     PURPLE     = colors.HexColor("#3a3a5c")
@@ -359,24 +428,24 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
 
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("title", fontSize=20, textColor=PURPLE,
-                                  spaceAfter=4, fontName="Helvetica-Bold",
+                                  spaceAfter=4, fontName=FONT_BOLD,
                                   alignment=TA_CENTER)
     sub_style   = ParagraphStyle("sub",   fontSize=11, textColor=GREY,
-                                  spaceAfter=2, fontName="Helvetica",
+                                  spaceAfter=2, fontName=FONT_REG,
                                   alignment=TA_CENTER)
     h2_style    = ParagraphStyle("h2",    fontSize=14, textColor=PURPLE,
                                   spaceBefore=14, spaceAfter=6,
-                                  fontName="Helvetica-Bold")
+                                  fontName=FONT_BOLD)
     h3_style    = ParagraphStyle("h3",    fontSize=12, textColor=PURPLE,
                                   spaceBefore=10, spaceAfter=4,
-                                  fontName="Helvetica-Bold")
+                                  fontName=FONT_BOLD)
     body_style  = ParagraphStyle("body",  fontSize=10, textColor=GREY,
-                                  spaceAfter=4, fontName="Helvetica",
+                                  spaceAfter=4, fontName=FONT_REG,
                                   leading=15)
     bold_style  = ParagraphStyle("bold",  fontSize=10, textColor=PURPLE,
-                                  spaceAfter=2, fontName="Helvetica-Bold")
+                                  spaceAfter=2, fontName=FONT_BOLD)
     small_style = ParagraphStyle("small", fontSize=9,  textColor=GREY,
-                                  spaceAfter=2, fontName="Helvetica")
+                                  spaceAfter=2, fontName=FONT_REG)
 
     story = []
 
@@ -386,24 +455,31 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
         story.append(logo)
         story.append(Spacer(1, 0.5*cm))   # more space between logo and title
 
+    report_subtitle = ZH.get("report_title", "NIR Spectrum Analysis Report") if use_zh else "NIR Spectrum Analysis Report"
     story.append(Paragraph("Filix Medtech", title_style))
-    story.append(Spacer(1, 0.3*cm))       # space between title and subtitle
-    story.append(Paragraph("NIR Spectrum Analysis Report", sub_style))
+    story.append(Spacer(1, 0.3*cm))
+    story.append(Paragraph(report_subtitle, sub_style))
     story.append(Spacer(1, 0.4*cm))
     story.append(HRFlowable(width="100%", thickness=2, color=PURPLE))
     story.append(Spacer(1, 0.4*cm))
 
     # Date & info
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    info_data = [
-        ["Reference Medicine:", med_name,  "Date:", now],
-        ["Sample File:",        sample_name, "", ""],
-    ]
+    if use_zh:
+        info_data = [
+            [ZH["ref_medicine"], med_name,  ZH["date"], now],
+            [ZH["sample_file"],  sample_name, "", ""],
+        ]
+    else:
+        info_data = [
+            ["Reference Medicine:", med_name,  "Date:", now],
+            ["Sample File:",        sample_name, "", ""],
+        ]
     info_table = Table(info_data, colWidths=[3.5*cm, 6*cm, 2*cm, 5*cm])
     info_table.setStyle(TableStyle([
-        ("FONTNAME",  (0,0), (-1,-1), "Helvetica"),
-        ("FONTNAME",  (0,0), (0,-1),  "Helvetica-Bold"),
-        ("FONTNAME",  (2,0), (2,-1),  "Helvetica-Bold"),
+        ("FONTNAME",  (0,0), (-1,-1), FONT_REG),
+        ("FONTNAME",  (0,0), (0,-1),  FONT_BOLD),
+        ("FONTNAME",  (2,0), (2,-1),  FONT_BOLD),
         ("FONTSIZE",  (0,0), (-1,-1), 10),
         ("TEXTCOLOR", (0,0), (-1,-1), GREY),
         ("TEXTCOLOR", (0,0), (0,-1),  PURPLE),
@@ -415,14 +491,17 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
 
     # ── Spectra ──────────────────────────────────────────────────────────
-    story.append(Paragraph("Spectrum Graphs", h2_style))
+    spectra_title = ZH.get("spectrum_graphs", "Spectrum Graphs") if use_zh else "Spectrum Graphs"
+    story.append(Paragraph(spectra_title, h2_style))
 
-    story.append(Paragraph(_pdf_safe(f"Reference Spectrum - {med_name}"), h3_style))
+    ref_label = (ZH["ref_spectrum"] + med_name) if use_zh else _pdf_safe(f"Reference Spectrum - {med_name}")
+    story.append(Paragraph(ref_label, h3_style))
     ref_img = RLImage(io.BytesIO(fig_ref_bytes), width=W, height=W*0.38)
     story.append(ref_img)
     story.append(Spacer(1, 0.3*cm))
 
-    story.append(Paragraph(_pdf_safe(f"Sample Spectrum - {sample_name}"), h3_style))
+    smp_label = (ZH["sample_spectrum"] + sample_name) if use_zh else _pdf_safe(f"Sample Spectrum - {sample_name}")
+    story.append(Paragraph(smp_label, h3_style))
     smp_img = RLImage(io.BytesIO(fig_sample_bytes), width=W, height=W*0.38)
     story.append(smp_img)
     story.append(Spacer(1, 0.4*cm))
@@ -430,10 +509,14 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
 
     # ── Analysis Results (new page) ──────────────────────────────────────
     story.append(PageBreak())
-    story.append(Paragraph("Analysis Results", h2_style))
+    analysis_title = ZH.get("analysis", "Analysis Results") if use_zh else "Analysis Results"
+    story.append(Paragraph(analysis_title, h2_style))
 
-    # Degree table — use ASCII-safe headers
-    hdr = ["Degree", "Adj. R2", "R2", "Adj.R2/R2 (%)"]
+    # Degree table
+    if use_zh:
+        hdr = [ZH["degree"], ZH["adj_r2"], ZH["r2"], ZH["ratio"]]
+    else:
+        hdr = ["Degree", "Adj. R2", "R2", "Adj.R2/R2 (%)"]
     tbl_data = [hdr]
     for row in res["table"]:
         tbl_data.append([
@@ -447,8 +530,8 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     deg_table.setStyle(TableStyle([
         ("BACKGROUND",   (0,0), (-1,0),  PURPLE),
         ("TEXTCOLOR",    (0,0), (-1,0),  WHITE),
-        ("FONTNAME",     (0,0), (-1,0),  "Helvetica-Bold"),
-        ("FONTNAME",     (0,1), (-1,-1), "Helvetica"),
+        ("FONTNAME",     (0,0), (-1,0),  FONT_BOLD),
+        ("FONTNAME",     (0,1), (-1,-1), FONT_REG),
         ("FONTSIZE",     (0,0), (-1,-1), 10),
         ("ALIGN",        (0,0), (-1,-1), "CENTER"),
         ("ROWBACKGROUNDS",(0,1),(-1,-1), [WHITE, LIGHT_BLUE]),
@@ -459,19 +542,28 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     story.append(deg_table)
     story.append(Spacer(1, 0.4*cm))
 
-    # Key metrics — ASCII safe
+    # Key metrics
     sim = res["similarity"]
-    metrics = [
-        ["Chosen Best Degree",  str(res["best_degree"])],
-        ["Best Degree Ratio",   f"{res['best_ratio']:.4f} %"],
-        ["Self Accuracy (R2)",  f"{res['self_acc']:.6f}"],
-        ["Test Accuracy (R2)",  f"{res['test_acc']:.6f}"],
-        ["Similarity",          f"{sim:.4f} %"],
-    ]
+    if use_zh:
+        metrics = [
+            [ZH["best_degree"],  str(res["best_degree"])],
+            [ZH["best_ratio"],   f"{res['best_ratio']:.4f} %"],
+            [ZH["self_acc"],     f"{res['self_acc']:.6f}"],
+            [ZH["test_acc"],     f"{res['test_acc']:.6f}"],
+            [ZH["similarity"],   f"{sim:.4f} %"],
+        ]
+    else:
+        metrics = [
+            ["Chosen Best Degree",  str(res["best_degree"])],
+            ["Best Degree Ratio",   f"{res['best_ratio']:.4f} %"],
+            ["Self Accuracy (R2)",  f"{res['self_acc']:.6f}"],
+            ["Test Accuracy (R2)",  f"{res['test_acc']:.6f}"],
+            ["Similarity",          f"{sim:.4f} %"],
+        ]
     met_table = Table(metrics, colWidths=[W*0.5, W*0.5])
     met_table.setStyle(TableStyle([
-        ("FONTNAME",     (0,0), (0,-1),  "Helvetica-Bold"),
-        ("FONTNAME",     (1,0), (1,-1),  "Helvetica"),
+        ("FONTNAME",     (0,0), (0,-1),  FONT_BOLD),
+        ("FONTNAME",     (1,0), (1,-1),  FONT_REG),
         ("FONTSIZE",     (0,0), (-1,-1), 10),
         ("TEXTCOLOR",    (0,0), (0,-1),  PURPLE),
         ("TEXTCOLOR",    (1,0), (1,-1),  GREY),
@@ -485,12 +577,13 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     story.append(Spacer(1, 0.3*cm))
 
     # Similarity highlight box
-    sim_data = [[f"Similarity: {sim:.2f}%"]]
+    sim_label = f"{ZH['sim_label']}{sim:.2f}%" if use_zh else f"Similarity: {sim:.2f}%"
+    sim_data = [[sim_label]]
     sim_table = Table(sim_data, colWidths=[W])
     sim_table.setStyle(TableStyle([
         ("BACKGROUND",   (0,0), (-1,-1), GREEN_BG),
         ("TEXTCOLOR",    (0,0), (-1,-1), GREEN_BD),
-        ("FONTNAME",     (0,0), (-1,-1), "Helvetica-Bold"),
+        ("FONTNAME",     (0,0), (-1,-1), FONT_BOLD),
         ("FONTSIZE",     (0,0), (-1,-1), 16),
         ("ALIGN",        (0,0), (-1,-1), "CENTER"),
         ("BOX",          (0,0), (-1,-1), 1.5, GREEN_BD),
@@ -501,23 +594,28 @@ def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, ex
     story.append(Spacer(1, 0.4*cm))
     story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
 
-    # ── How to Read — always use PDF_EXPLANATIONS_EN (ASCII safe) ────────
+    # ── How to Read ───────────────────────────────────────────────────────
     story.append(PageBreak())
-    story.append(Paragraph("How to Read These Results", h2_style))
+    how_title  = ZH.get("how_to_read", "How to Read These Results") if use_zh else "How to Read These Results"
+    footer_txt = ZH.get("footer", "Generated by Filix Medtech NIR Spectrum Viewer") if use_zh else "Generated by Filix Medtech NIR Spectrum Viewer"
+    story.append(Paragraph(how_title, h2_style))
     story.append(Spacer(1, 0.2*cm))
 
-    for exp_title, exp_desc in PDF_EXPLANATIONS_EN:
-        story.append(Paragraph(_pdf_safe(exp_title), bold_style))
+    exp_list = PDF_EXPLANATIONS_ZH if use_zh else PDF_EXPLANATIONS_EN
+    for exp_title, exp_desc in exp_list:
+        t = exp_title if use_zh else _pdf_safe(exp_title)
+        story.append(Paragraph(t, bold_style))
         for line in exp_desc.split("\n"):
-            line = _pdf_safe(line.strip())
+            line = line.strip()
             if line:
+                line = line if use_zh else _pdf_safe(line)
                 story.append(Paragraph(line, body_style))
         story.append(Spacer(1, 0.2*cm))
 
     story.append(Spacer(1, 0.4*cm))
     story.append(HRFlowable(width="100%", thickness=1, color=PURPLE))
     story.append(Spacer(1, 0.2*cm))
-    story.append(Paragraph("Generated by Filix Medtech NIR Spectrum Viewer", small_style))
+    story.append(Paragraph(footer_txt, small_style))
 
     doc.build(story)
     buf.seek(0)
