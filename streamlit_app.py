@@ -432,6 +432,19 @@ if device_id and not st.session_state.db_loaded:
     st.session_state.user_db   = db_load(device_id)
     st.session_state.db_loaded = True
 
+# ── DEBUG (remove after testing) ──────────────────────────────────────────
+with st.expander("🔧 Debug Info", expanded=False):
+    st.write(f"**raw_did from component:** `{raw_did}`")
+    st.write(f"**device_id in session:** `{device_id}`")
+    st.write(f"**db_loaded:** `{st.session_state.db_loaded}`")
+    st.write(f"**medicines in session:** `{list(st.session_state.user_db.keys())}`")
+    if device_id:
+        live = db_load(device_id)
+        st.write(f"**medicines in Supabase:** `{list(live.keys())}`")
+    else:
+        st.write("**medicines in Supabase:** (no device_id yet)")
+# ── END DEBUG ──────────────────────────────────────────────────────────────
+
 S = STRINGS[st.session_state.lang]
 
 # ─────────────────────────────────────────────
