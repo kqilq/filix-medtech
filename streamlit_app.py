@@ -417,13 +417,17 @@ if "db_loaded"    not in st.session_state: st.session_state.db_loaded    = False
 if "user_db"      not in st.session_state: st.session_state.user_db      = {}
 if "device_id"    not in st.session_state: st.session_state.device_id    = ""
 
-# Get device ID from browser localStorage via the component
-# default="" means Python gets "" on the very first render (before JS responds)
+# Get device ID from browser localStorage via the component.
+# On the very first render the component returns "" (JS hasn't responded yet).
+# We store a "waiting" flag and trigger a rerun so the component gets a
+# second chance to respond with the actual device ID.
 raw_did = _ls_comp(action="get_did", lskey="filix_device_id",
                    default="", key="did_reader")
+
 if raw_did and raw_did != st.session_state.device_id:
+    # Component responded with a device ID — store it and load from Supabase
     st.session_state.device_id = raw_did
-    st.session_state.db_loaded = False   # force reload from Supabase
+    st.session_state.db_loaded = False
 
 device_id = st.session_state.device_id
 
@@ -432,18 +436,10 @@ if device_id and not st.session_state.db_loaded:
     st.session_state.user_db   = db_load(device_id)
     st.session_state.db_loaded = True
 
-# ── DEBUG (remove after testing) ──────────────────────────────────────────
-with st.expander("🔧 Debug Info", expanded=False):
-    st.write(f"**raw_did from component:** `{raw_did}`")
-    st.write(f"**device_id in session:** `{device_id}`")
-    st.write(f"**db_loaded:** `{st.session_state.db_loaded}`")
-    st.write(f"**medicines in session:** `{list(st.session_state.user_db.keys())}`")
-    if device_id:
-        live = db_load(device_id)
-        st.write(f"**medicines in Supabase:** `{list(live.keys())}`")
-    else:
-        st.write("**medicines in Supabase:** (no device_id yet)")
-# ── END DEBUG ──────────────────────────────────────────────────────────────
+# If we still don't have a device_id, trigger a rerun to give the component
+# time to respond (this handles the first-render timing issue)
+if not device_id and not raw_did:
+    st.rerun()
 
 S = STRINGS[st.session_state.lang]
 
