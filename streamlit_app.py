@@ -17,15 +17,12 @@ import json
 import datetime
 import io
 import base64
-from streamlit_local_storage import LocalStorage
 
 # ─────────────────────────────────────────────
 #  Paths & registry
 # ─────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-USER_DB  = os.path.join(BASE_DIR, "user_medicines.json")
+BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(BASE_DIR, "filix_logo.png")
-# Try the Downloads path as fallback
 if not os.path.exists(LOGO_PATH):
     LOGO_PATH = "/Users/kaila/Downloads/Filix-Medtech-logo_final-02.png"
 
@@ -85,7 +82,6 @@ STRINGS = {
         "name_saved":        "Saved as:",
         "language_btn":      "繁體中文",
         "running":           "⏳ Running analysis…",
-        "complete":          "✅ Analysis complete",
         "similarity_result": "🎯 Similarity",
         "explanations": [
             ("📐 Polynomial Degree",
@@ -155,7 +151,6 @@ STRINGS = {
         "name_saved":        "已儲存為：",
         "language_btn":      "English",
         "running":           "⏳ 正在分析中…",
-        "complete":          "✅ 分析完成",
         "similarity_result": "🎯 相似度",
         "explanations": [
             ("📐 多項式階數（Polynomial Degree）",
@@ -189,37 +184,81 @@ STRINGS = {
 }
 
 # ─────────────────────────────────────────────
-#  localStorage helpers
-#  Medicines are stored in the browser's localStorage as base64-encoded JSON.
-#  They persist across sessions on the same device/browser.
-#  Each device has its own private storage — nothing is shared between users.
+#  localStorage — pure JS bidirectional component
+#
+#  Strategy:
+#  1. On every page load, a hidden JS snippet reads localStorage and
+#     posts the value into a Streamlit text_input (via DOM manipulation).
+#  2. We use st.components.v1.html to WRITE to localStorage whenever
+#     the db changes (fire-and-forget, no return value needed).
+#  3. Reading is done via a custom component that returns a value to Python.
 # ─────────────────────────────────────────────
 LS_KEY = "filix_user_medicines"
 
-def db_to_storage(db):
-    """Convert in-memory db (with bytes values) to a JSON-serialisable dict."""
-    serialisable = {}
+def db_to_json(db):
+    out = {}
     for name, info in db.items():
-        serialisable[name] = {
-            "b64":      base64.b64encode(info["bytes"]).decode("utf-8"),
+        out[name] = {
+            "b64":      base64.b64encode(info["bytes"]).decode(),
             "filename": info.get("filename", ""),
             "added":    info.get("added", ""),
         }
-    return serialisable
+    return json.dumps(out, ensure_ascii=False)
 
-def db_from_storage(stored):
-    """Convert stored dict back to in-memory db (with bytes values)."""
+def db_from_json(s):
     db = {}
-    for name, info in stored.items():
-        try:
+    if not s:
+        return db
+    try:
+        stored = json.loads(s)
+        for name, info in stored.items():
             db[name] = {
                 "bytes":    base64.b64decode(info["b64"]),
                 "filename": info.get("filename", ""),
                 "added":    info.get("added", ""),
             }
-        except Exception:
-            pass
+    except Exception:
+        pass
     return db
+
+def ls_write(db):
+    """Write db to browser localStorage (fire-and-forget JS)."""
+    payload = db_to_json(db)
+    # JSON-encode the payload so it's safe to embed in JS
+    js_payload = json.dumps(payload)   # this double-encodes: Python str → JS string literal
+    st.components.v1.html(
+        f"<script>localStorage.setItem({json.dumps(LS_KEY)}, {js_payload});</script>",
+        height=0,
+    )
+
+def ls_read():
+    """
+    Read from browser localStorage using a Streamlit component.
+    Returns the stored JSON string, or "" if nothing saved.
+    This uses st.components.v1.declare_component pattern via html+postMessage.
+    Because st.components.v1.html cannot return values, we use a workaround:
+    store the value in a hidden query param via JS, then read it server-side.
+    """
+    # We inject JS that reads localStorage and appends it to the URL as ?_ls=...
+    # then Streamlit reads st.query_params["_ls"]
+    # This only runs once per session (before ls_loaded is set).
+    st.components.v1.html(f"""
+        <script>
+        (function() {{
+            var val = localStorage.getItem({json.dumps(LS_KEY)}) || "";
+            if (val) {{
+                // Post to parent Streamlit frame to set query param
+                var url = new URL(window.parent.location.href);
+                if (!url.searchParams.get('_ls')) {{
+                    url.searchParams.set('_ls', encodeURIComponent(val));
+                    window.parent.history.replaceState(null, '', url.toString());
+                    // Trigger a rerun by dispatching a storage event
+                    window.parent.location.reload();
+                }}
+            }}
+        }})();
+        </script>
+    """, height=0)
 
 # ─────────────────────────────────────────────
 #  Data helpers
@@ -242,7 +281,7 @@ def load_spectrum(path_or_bytes, from_bytes=False):
         df = pd.read_csv(io.BytesIO(path_or_bytes), header=0)
     else:
         df = pd.read_csv(path_or_bytes, header=0)
-    intensity_row = df.iloc[0, 1:]
+    intensity_row    = df.iloc[0, 1:]
     intensity_values = intensity_row.astype(float).values
     return list(range(len(intensity_values))), intensity_values
 
@@ -251,17 +290,17 @@ def legendre_features(x, degree):
     return legendre.legvander(x_scaled, degree)
 
 def run_analysis(standard_path, test_bytes):
-    standard = clean_file(standard_path)
-    test     = clean_file(test_bytes, from_bytes=True)
+    standard   = clean_file(standard_path)
+    test       = clean_file(test_bytes, from_bytes=True)
     wavelength = standard["Wavelength"].values
     intensity  = standard["Intensity"].values
     valid_degrees, adj_r2s = [], []
     stop_found = False
     for degree in range(2, 11):
         XX_poly = legendre_features(wavelength, degree)[:, 1:]
-        XX = sm.add_constant(XX_poly)
-        model = sm.OLS(intensity, XX).fit()
-        pvals = model.pvalues[1:]
+        XX      = sm.add_constant(XX_poly)
+        model   = sm.OLS(intensity, XX).fit()
+        pvals   = model.pvalues[1:]
         if np.all(pvals < 0.001) and not stop_found:
             valid_degrees.append(degree)
             adj_r2s.append(model.rsquared_adj)
@@ -274,36 +313,36 @@ def run_analysis(standard_path, test_bytes):
     r_square, ratios = [], []
     for idx, degree in enumerate(valid_degrees):
         poly_reg = PolynomialFeatures(degree=degree)
-        X_poly = poly_reg.fit_transform(X)
-        result = sm.OLS(y, X_poly).fit()
+        X_poly   = poly_reg.fit_transform(X)
+        result   = sm.OLS(y, X_poly).fit()
         RSS = TSS = 0
         for i in range(len(y)):
             y_est = result.predict(poly_reg.fit_transform([[X[i][0]]]))[0]
-            RSS += (y[i] - y_est) ** 2
-            TSS += (y[i] - np.mean(y)) ** 2
+            RSS  += (y[i] - y_est) ** 2
+            TSS  += (y[i] - np.mean(y)) ** 2
         R_sq = 1 - RSS / TSS
         r_square.append(R_sq)
         ratios.append((adj_r2s[idx] / R_sq) * 100)
     best_idx    = int(np.argmin(np.abs(np.array(ratios) - 100)))
     best_degree = valid_degrees[best_idx]
-    poly_reg = PolynomialFeatures(degree=best_degree)
-    X_poly = poly_reg.fit_transform(X)
+    poly_reg    = PolynomialFeatures(degree=best_degree)
+    X_poly      = poly_reg.fit_transform(X)
     final_model = sm.OLS(y, X_poly).fit()
     RSS = TSS = 0
     for i in range(len(y)):
         y_est = final_model.predict(poly_reg.fit_transform([[X[i][0]]]))[0]
-        RSS += (y[i] - y_est) ** 2
-        TSS += (y[i] - np.mean(y)) ** 2
+        RSS  += (y[i] - y_est) ** 2
+        TSS  += (y[i] - np.mean(y)) ** 2
     final_R_sq = 1 - RSS / TSS
-    y_test = test["Intensity"].values
+    y_test   = test["Intensity"].values
     poly_reg = PolynomialFeatures(degree=best_degree)
-    X_poly = poly_reg.fit_transform(X)
-    result = sm.OLS(y, X_poly).fit()
+    X_poly   = poly_reg.fit_transform(X)
+    result   = sm.OLS(y, X_poly).fit()
     RSS = TSS = 0
     for i in range(len(y)):
-        y_est = result.predict(poly_reg.fit_transform([[X[i][0]]]))[0]
-        RSS += (y_test[i] - y_est) ** 2
-        TSS += (y_test[i] - np.mean(y)) ** 2
+        y_est  = result.predict(poly_reg.fit_transform([[X[i][0]]]))[0]
+        RSS   += (y_test[i] - y_est) ** 2
+        TSS   += (y_test[i] - np.mean(y)) ** 2
     R_sq_test  = 1 - RSS / TSS
     similarity = (R_sq_test / final_R_sq) * 100
     degree_table = [
@@ -312,12 +351,12 @@ def run_analysis(standard_path, test_bytes):
         for d, a, r, rt in zip(valid_degrees, adj_r2s, r_square, ratios)
     ]
     return {
-        "table":        degree_table,
-        "best_degree":  best_degree,
-        "best_ratio":   ratios[best_idx],
-        "self_acc":     final_R_sq,
-        "test_acc":     R_sq_test,
-        "similarity":   similarity,
+        "table":       degree_table,
+        "best_degree": best_degree,
+        "best_ratio":  ratios[best_idx],
+        "self_acc":    final_R_sq,
+        "test_acc":    R_sq_test,
+        "similarity":  similarity,
     }
 
 def make_spectrum_fig(px, intensity, title, color):
@@ -342,86 +381,43 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    /* Global font size bump */
-    html, body, [class*="css"] {
-        font-size: 17px !important;
-    }
-    /* Headings */
+    html, body, [class*="css"] { font-size: 17px !important; }
     h1 { font-size: 2rem !important; }
     h2 { font-size: 1.7rem !important; }
     h3 { font-size: 1.4rem !important; }
     h4 { font-size: 1.2rem !important; }
-    /* Paragraphs, labels, captions */
     p, label, .stMarkdown, .stCaption,
     .stText, div[data-testid="stMarkdownContainer"] p {
         font-size: 1.05rem !important;
         line-height: 1.6 !important;
     }
-    /* Buttons */
     .stButton > button {
         font-size: 1.35rem !important;
         padding: 0.7rem 1.6rem !important;
     }
-    /* Metric labels & values */
-    [data-testid="stMetricLabel"]  { font-size: 1rem !important; }
-    [data-testid="stMetricValue"]  { font-size: 1.4rem !important; }
-    /* Dataframe */
+    [data-testid="stMetricLabel"] { font-size: 1rem !important; }
+    [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
     .stDataFrame { font-size: 1rem !important; }
-    /* Selectbox / text input */
     .stSelectbox label, .stTextInput label { font-size: 1.05rem !important; }
-    /* Cards */
     .med-card {
-        background: white;
-        border: 1px solid #ddd;
-        border-radius: 8px;
-        padding: 18px 22px;
-        margin-bottom: 14px;
+        background: white; border: 1px solid #ddd;
+        border-radius: 8px; padding: 18px 22px; margin-bottom: 14px;
     }
     .med-card h3 { margin: 0 0 6px 0; color: #3a3a5c; font-size: 1.3rem; }
     .med-card p  { margin: 0 0 10px 0; color: #555; font-size: 1.25rem; }
-    /* Info note */
     .info-note {
-        background: #eef4fb;
-        border: 1px solid #b0cce8;
-        border-radius: 6px;
-        padding: 10px 16px;
-        color: #2a5080;
-        font-size: 1rem;
-        margin-bottom: 12px;
+        background: #eef4fb; border: 1px solid #b0cce8;
+        border-radius: 6px; padding: 10px 16px;
+        color: #2a5080; font-size: 1rem; margin-bottom: 12px;
     }
-    /* Similarity highlight */
     .similarity-box {
-        background: #f0fff0;
-        border: 2px solid #5a7a5c;
-        border-radius: 8px;
-        padding: 16px 24px;
-        text-align: center;
-        font-size: 1.6rem;
-        font-weight: bold;
-        color: #3a3a5c;
-        margin: 12px 0;
+        background: #f0fff0; border: 2px solid #5a7a5c;
+        border-radius: 8px; padding: 16px 24px;
+        text-align: center; font-size: 1.6rem;
+        font-weight: bold; color: #3a3a5c; margin: 12px 0;
     }
 </style>
 """, unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-#  LocalStorage — persistent per-device storage
-# ─────────────────────────────────────────────
-_ls = LocalStorage()
-
-def ls_load():
-    """Load medicines from browser localStorage into session_state.user_db."""
-    raw = _ls.getItem(LS_KEY)
-    if raw and isinstance(raw, dict):
-        return db_from_storage(raw)
-    return {}
-
-def ls_save(db):
-    """Save medicines from session_state.user_db to browser localStorage."""
-    _ls.setItem(LS_KEY, db_to_storage(db))
-
-def ls_delete_all():
-    _ls.deleteItem(LS_KEY)
 
 # ─────────────────────────────────────────────
 #  Session state initialisation
@@ -432,17 +428,45 @@ if "selected_med" not in st.session_state: st.session_state.selected_med = None
 if "upload_bytes" not in st.session_state: st.session_state.upload_bytes = None
 if "upload_name"  not in st.session_state: st.session_state.upload_name  = None
 if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
+if "user_db"      not in st.session_state: st.session_state.user_db      = {}
 if "ls_loaded"    not in st.session_state: st.session_state.ls_loaded    = False
 
-# Always try to load from localStorage on every render until we get data
+# ── Load from localStorage via query param trick ──────────────────────────
+# On first load, JS writes localStorage value into ?_ls=... and reloads.
+# On second load, Python reads ?_ls and populates user_db.
 if not st.session_state.ls_loaded:
-    loaded = ls_load()
-    if loaded:
-        st.session_state.user_db   = loaded
+    qp = st.query_params
+    ls_val = qp.get("_ls", "")
+    if ls_val:
+        # Decode URL-encoded value
+        import urllib.parse
+        try:
+            decoded = urllib.parse.unquote(ls_val)
+            loaded  = db_from_json(decoded)
+            if loaded:
+                st.session_state.user_db  = loaded
+        except Exception:
+            pass
+        # Clear the query param so it doesn't stay in the URL
+        st.query_params.clear()
         st.session_state.ls_loaded = True
     else:
-        if "user_db" not in st.session_state:
-            st.session_state.user_db = {}
+        # Inject JS to read localStorage and reload with ?_ls=...
+        st.components.v1.html(f"""
+            <script>
+            (function() {{
+                var val = localStorage.getItem({json.dumps(LS_KEY)});
+                if (val && val.length > 2) {{
+                    var url = new URL(window.parent.location.href);
+                    if (!url.searchParams.get('_ls')) {{
+                        url.searchParams.set('_ls', encodeURIComponent(val));
+                        window.parent.location.replace(url.toString());
+                    }}
+                }}
+            }})();
+            </script>
+        """, height=0)
+        st.session_state.ls_loaded = True   # don't retry — if nothing in LS, start fresh
 
 S = STRINGS[st.session_state.lang]
 
@@ -454,8 +478,10 @@ with col_logo:
     if os.path.exists(LOGO_PATH):
         st.image(LOGO_PATH, width=56)
 with col_title:
-    st.markdown(f"<div style='padding-top:8px'><h2 style='color:#3a3a5c;margin:0'>{S['app_title']}</h2></div>",
-                unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='padding-top:8px'><h2 style='color:#3a3a5c;margin:0'>"
+        f"{S['app_title']}</h2></div>",
+        unsafe_allow_html=True)
 with col_lang:
     if st.button(S["language_btn"], key="lang_btn"):
         st.session_state.lang = "zh" if st.session_state.lang == "en" else "en"
@@ -464,7 +490,7 @@ with col_lang:
 st.markdown("<hr style='margin:0 0 16px 0'>", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  Navigation helpers
+#  Navigation helper
 # ─────────────────────────────────────────────
 def goto(page, med=None):
     st.session_state.page         = page
@@ -483,12 +509,10 @@ if st.session_state.page == "home":
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
         if st.button(S["list_medicines"], use_container_width=True, key="btn_list"):
-            goto("list")
-            st.rerun()
+            goto("list"); st.rerun()
         st.write("")
         if st.button(S["your_medicines"], use_container_width=True, key="btn_your"):
-            goto("your_medicines")
-            st.rerun()
+            goto("your_medicines"); st.rerun()
 
 # ─────────────────────────────────────────────
 #  LIST PAGE
@@ -496,24 +520,20 @@ if st.session_state.page == "home":
 elif st.session_state.page == "list":
     if st.button(S["back_home"], key="back_home_list"):
         goto("home"); st.rerun()
-
     st.markdown(f"## {S['list_title']}")
     st.markdown("---")
-
     for name, info in MEDICINES.items():
         desc = info["description_zh"] if st.session_state.lang == "zh" else info["description"]
-        with st.container():
-            st.markdown(f"""<div class="med-card">
-                <h3>{name}</h3><p>{desc}</p></div>""", unsafe_allow_html=True)
-            if st.button(S["view_spectrum"], key=f"view_{name}"):
-                goto("detail", med=name); st.rerun()
+        st.markdown(f'<div class="med-card"><h3>{name}</h3><p>{desc}</p></div>',
+                    unsafe_allow_html=True)
+        if st.button(S["view_spectrum"], key=f"view_{name}"):
+            goto("detail", med=name); st.rerun()
 
 # ─────────────────────────────────────────────
 #  DETAIL PAGE
 # ─────────────────────────────────────────────
 elif st.session_state.page == "detail":
     name = st.session_state.selected_med
-
     col_back, col_title_d = st.columns([0.2, 0.8])
     with col_back:
         if st.button(S["back_list"], key="back_list_btn"):
@@ -522,34 +542,31 @@ elif st.session_state.page == "detail":
         st.markdown(f"## {name}")
 
     desc_key = "description_zh" if st.session_state.lang == "zh" else "description"
-    st.markdown(f"<p style='font-size:1.25rem;color:#555;margin-top:-8px'>{MEDICINES[name][desc_key]}</p>",
-                unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='font-size:1.25rem;color:#555;margin-top:-8px'>"
+        f"{MEDICINES[name][desc_key]}</p>",
+        unsafe_allow_html=True)
     st.markdown("---")
 
     # Reference spectrum
     st.markdown(f"### {S['ref_spectrum']}")
     try:
         px, intensity = load_spectrum(MEDICINES[name]["csv"])
-        fig_ref = make_spectrum_fig(px, intensity,
-                                    f"{name} — Pixel vs. Intensity", "purple")
-        st.pyplot(fig_ref)
-        plt.close(fig_ref)
+        fig_ref = make_spectrum_fig(px, intensity, f"{name} — Pixel vs. Intensity", "purple")
+        st.pyplot(fig_ref); plt.close(fig_ref)
     except Exception as e:
         st.error(f"Could not load reference spectrum: {e}")
 
     st.markdown("---")
-
-    # ── Upload section ────────────────────────────────────────────────
     st.markdown(f"### {S['upload_section']}")
     st.markdown(f'<div class="info-note">{S["upload_note"]}</div>', unsafe_allow_html=True)
 
     uploaded = st.file_uploader(S["upload_btn"], type=["csv"], key="uploader")
 
-    # Or pick from saved medicines
     user_db = st.session_state.user_db
     if user_db:
         st.markdown(f"**{S['from_saved']}**")
-        saved_names = list(user_db.keys())
+        saved_names  = list(user_db.keys())
         chosen_saved = st.selectbox(S["from_saved"], ["—"] + saved_names,
                                     label_visibility="visible", key="saved_sel")
         if chosen_saved != "—":
@@ -561,56 +578,45 @@ elif st.session_state.page == "detail":
     else:
         st.caption(S["no_saved"])
 
-    # Handle new file upload
     if uploaded is not None:
-        file_bytes = uploaded.read()
+        file_bytes   = uploaded.read()
         default_name = os.path.splitext(uploaded.name)[0]
         st.session_state.upload_bytes = file_bytes
-
-        # Name input
         chosen_name = st.text_input(S["name_prompt"], value=default_name, key="name_input")
         if st.button(S["save_btn"], key="save_analyse_btn"):
             final_name = chosen_name.strip() if chosen_name.strip() else default_name
-            # Store bytes in session state — no disk write, fully private per user
             user_db[final_name] = {
-                "bytes": file_bytes,
+                "bytes":    file_bytes,
                 "filename": uploaded.name,
-                "added": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "added":    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             }
-            st.session_state.user_db      = user_db
-            ls_save(user_db)   # persist to browser localStorage
+            st.session_state.user_db     = user_db
+            ls_write(user_db)            # persist to browser localStorage
             st.session_state.upload_name  = final_name
             st.session_state.analysis_res = None
             st.success(f"{S['name_saved']} **{final_name}**")
             st.rerun()
 
-    # Show uploaded sample graph + run analysis
     if st.session_state.upload_bytes is not None:
         display_name = st.session_state.upload_name or "Sample"
-
         if st.button(S["clear_btn"], key="clear_btn"):
             st.session_state.upload_bytes = None
             st.session_state.upload_name  = None
             st.session_state.analysis_res = None
             st.rerun()
-
         st.markdown(f"**{display_name}**")
         try:
             u_px, u_int = load_spectrum(st.session_state.upload_bytes, from_bytes=True)
             fig_user = make_spectrum_fig(u_px, u_int,
-                                         f"{display_name} — Pixel vs. Intensity",
-                                         "darkorange")
-            st.pyplot(fig_user)
-            plt.close(fig_user)
+                                         f"{display_name} — Pixel vs. Intensity", "darkorange")
+            st.pyplot(fig_user); plt.close(fig_user)
         except Exception as e:
             st.error(f"Could not load sample spectrum: {e}")
 
-        # Run analysis
         if st.session_state.analysis_res is None:
             with st.spinner(S["running"]):
                 try:
-                    res = run_analysis(MEDICINES[name]["csv"],
-                                       st.session_state.upload_bytes)
+                    res = run_analysis(MEDICINES[name]["csv"], st.session_state.upload_bytes)
                     st.session_state.analysis_res = res
                 except Exception as e:
                     st.error(f"Analysis failed: {e}")
@@ -619,35 +625,23 @@ elif st.session_state.page == "detail":
             res = st.session_state.analysis_res
             st.markdown("---")
             st.markdown(f"### {S['analysis_title']}")
-
-            # Degree table
             df_table = pd.DataFrame(res["table"])
             df_table.rename(columns={
-                "degree": S["degree"],
-                "Adj. R²": S["adj_r2"],
-                "R²": S["r2"],
-                "Adj.R²/R² (%)": S["ratio"],
+                "degree": S["degree"], "Adj. R²": S["adj_r2"],
+                "R²": S["r2"], "Adj.R²/R² (%)": S["ratio"],
             }, inplace=True)
             st.dataframe(df_table, use_container_width=True, hide_index=True)
-
-            # Summary metrics
             col1, col2, col3 = st.columns(3)
             col1.metric(S["chosen_degree"], res["best_degree"])
             col2.metric(S["self_acc"],  f"{res['self_acc']:.6f}")
             col3.metric(S["test_acc"],  f"{res['test_acc']:.6f}")
-
             col4, col5 = st.columns(2)
             col4.metric(S["best_ratio"], f"{res['best_ratio']:.4f} %")
-
             sim = res["similarity"]
             col5.metric(S["similarity_result"], f"{sim:.4f} %")
-
-            # Similarity highlight
             st.markdown(
                 f'<div class="similarity-box">{S["similarity_result"]}: {sim:.2f}%</div>',
                 unsafe_allow_html=True)
-
-            # Explanation expander
             with st.expander(S["how_to_read"]):
                 for title, desc in S["explanations"]:
                     st.markdown(f"**{title}**")
@@ -660,7 +654,6 @@ elif st.session_state.page == "detail":
 elif st.session_state.page == "your_medicines":
     if st.button(S["back_home"], key="back_home_your"):
         goto("home"); st.rerun()
-
     st.markdown(f"## {S['your_med_title']}")
     st.markdown("---")
 
@@ -674,27 +667,22 @@ elif st.session_state.page == "your_medicines":
                 col_name, col_del = st.columns([0.85, 0.15])
                 with col_name:
                     st.markdown(f"**{med_name}**")
-                    st.caption(f"{S['file_lbl']} {info.get('filename', '?')}  |  "
-                               f"{S['added_lbl']} {info.get('added', '?')}")
+                    st.caption(f"{S['file_lbl']} {info.get('filename','?')}  |  "
+                               f"{S['added_lbl']} {info.get('added','?')}")
                 with col_del:
                     if st.button(S["delete_btn"], key=f"del_{med_name}"):
                         to_delete = med_name
-
-                # View spectrum button
                 if st.button(S["view_spectrum"], key=f"view_saved_{med_name}"):
                     try:
                         px, intensity = load_spectrum(info["bytes"], from_bytes=True)
                         fig = make_spectrum_fig(px, intensity,
-                                               f"{med_name} — Pixel vs. Intensity",
-                                               "darkorange")
-                        st.pyplot(fig)
-                        plt.close(fig)
+                                               f"{med_name} — Pixel vs. Intensity", "darkorange")
+                        st.pyplot(fig); plt.close(fig)
                     except Exception as e:
                         st.error(str(e))
                 st.markdown("---")
-
         if to_delete:
             del user_db[to_delete]
             st.session_state.user_db = user_db
-            ls_save(user_db)   # persist deletion to browser localStorage
+            ls_write(user_db)        # persist deletion to browser localStorage
             st.rerun()
