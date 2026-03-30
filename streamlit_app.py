@@ -416,18 +416,18 @@ if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
 if "db_loaded"    not in st.session_state: st.session_state.db_loaded    = False
 if "user_db"      not in st.session_state: st.session_state.user_db      = {}
 if "device_id"    not in st.session_state: st.session_state.device_id    = ""
+if "did_rerun"    not in st.session_state: st.session_state.did_rerun    = False
 
 # Get device ID from browser localStorage via the component.
 # On the very first render the component returns "" (JS hasn't responded yet).
-# We store a "waiting" flag and trigger a rerun so the component gets a
-# second chance to respond with the actual device ID.
+# We trigger ONE rerun to give the component time to respond.
 raw_did = _ls_comp(action="get_did", lskey="filix_device_id",
                    default="", key="did_reader")
 
 if raw_did and raw_did != st.session_state.device_id:
-    # Component responded with a device ID — store it and load from Supabase
     st.session_state.device_id = raw_did
     st.session_state.db_loaded = False
+    st.session_state.did_rerun = False  # reset for next session
 
 device_id = st.session_state.device_id
 
@@ -436,9 +436,9 @@ if device_id and not st.session_state.db_loaded:
     st.session_state.user_db   = db_load(device_id)
     st.session_state.db_loaded = True
 
-# If we still don't have a device_id, trigger a rerun to give the component
-# time to respond (this handles the first-render timing issue)
-if not device_id and not raw_did:
+# Trigger ONE rerun if component hasn't responded yet (first render timing)
+if not device_id and not raw_did and not st.session_state.did_rerun:
+    st.session_state.did_rerun = True
     st.rerun()
 
 S = STRINGS[st.session_state.lang]
