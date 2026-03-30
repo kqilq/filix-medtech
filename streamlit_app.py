@@ -222,14 +222,24 @@ def db_from_json(s):
         pass
     return db
 
+# Counter to ensure each component call gets a unique Streamlit key
+if "ls_call_count" not in st.session_state:
+    st.session_state.ls_call_count = 0
+
+def _next_ls_key():
+    st.session_state.ls_call_count += 1
+    return f"_ls_{st.session_state.ls_call_count}"
+
 def ls_read():
     """Read from browser localStorage. Returns JSON string or ''."""
-    result = _ls_component(action="read", key=LS_KEY, default="")
+    result = _ls_component(action="read", lskey=LS_KEY, default="",
+                           key=_next_ls_key())
     return result or ""
 
 def ls_write(db):
     """Write db to browser localStorage."""
-    _ls_component(action="write", key=LS_KEY, value=db_to_json(db), default="")
+    _ls_component(action="write", lskey=LS_KEY, value=db_to_json(db), default="",
+                  key=_next_ls_key())
 
 # ─────────────────────────────────────────────
 #  Data helpers

@@ -13,18 +13,18 @@
 
   function onRender(event) {
     if (event.data.type !== "streamlit:render") return;
-    var args = event.data.args;
-    var action = args.action;
-    var key    = args.key;
+    var args    = event.data.args;
+    var action  = args.action;
+    var lskey   = args.lskey;   // renamed from "key" to avoid Streamlit conflict
 
     if (action === "read") {
-      var val = localStorage.getItem(key) || "";
+      var val = localStorage.getItem(lskey) || "";
       sendValue(val);
     } else if (action === "write") {
-      localStorage.setItem(key, args.value);
+      localStorage.setItem(lskey, args.value);
       sendValue("ok");
     } else if (action === "delete") {
-      localStorage.removeItem(key);
+      localStorage.removeItem(lskey);
       sendValue("ok");
     }
   }
