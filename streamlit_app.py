@@ -1,6 +1,6 @@
 """
 Filix Medtech – NIR Spectrum Viewer  (Streamlit web version)
-Run locally:  streamlit run streamlit_app.py
+Persistent per-device storage via Supabase.
 """
 
 import streamlit as st
@@ -15,6 +15,7 @@ matplotlib.use("Agg")
 import os
 import datetime
 import io
+import base64
 
 # ─────────────────────────────────────────────
 #  Paths & registry
@@ -180,6 +181,61 @@ STRINGS = {
 }
 
 # ─────────────────────────────────────────────
+#  Supabase client (credentials from st.secrets)
+# ─────────────────────────────────────────────
+@st.cache_resource
+def get_supabase():
+    from supabase import create_client
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+def db_load(device_id: str) -> dict:
+    """Load all medicines for this device from Supabase."""
+    try:
+        sb = get_supabase()
+        rows = sb.table("user_medicines") \
+                 .select("name,filename,added,csv_data") \
+                 .eq("device_id", device_id) \
+                 .execute().data
+        result = {}
+        for row in rows:
+            result[row["name"]] = {
+                "bytes":    base64.b64decode(row["csv_data"]),
+                "filename": row["filename"],
+                "added":    row["added"],
+            }
+        return result
+    except Exception:
+        return {}
+
+def db_save(device_id: str, name: str, info: dict):
+    """Upsert one medicine for this device into Supabase."""
+    try:
+        sb = get_supabase()
+        sb.table("user_medicines").upsert({
+            "device_id": device_id,
+            "name":      name,
+            "filename":  info.get("filename", ""),
+            "added":     info.get("added", ""),
+            "csv_data":  base64.b64encode(info["bytes"]).decode(),
+        }, on_conflict="device_id,name").execute()
+    except Exception:
+        pass
+
+def db_delete(device_id: str, name: str):
+    """Delete one medicine for this device from Supabase."""
+    try:
+        sb = get_supabase()
+        sb.table("user_medicines") \
+          .delete() \
+          .eq("device_id", device_id) \
+          .eq("name", name) \
+          .execute()
+    except Exception:
+        pass
+
+# ─────────────────────────────────────────────
 #  Data helpers
 # ─────────────────────────────────────────────
 def clean_file(path_or_bytes, from_bytes=False):
@@ -339,7 +395,36 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  Session state — loads immediately, no JS needed
+#  Device ID — stored in browser localStorage via JS component
+#  A unique ID is generated once per browser and stored permanently.
+#  It is passed to Python via st.query_params on first load.
+# ─────────────────────────────────────────────
+COOKIE_NAME = "filix_device_id"
+
+# Inject JS to set/read device ID and put it in URL query param
+st.components.v1.html(f"""
+    <script>
+    (function() {{
+        function getLS(k) {{ try {{ return localStorage.getItem(k); }} catch(e) {{ return null; }} }}
+        function setLS(k,v) {{ try {{ localStorage.setItem(k,v); }} catch(e) {{}} }}
+        var did = getLS('{COOKIE_NAME}');
+        if (!did) {{
+            did = 'dev_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+            setLS('{COOKIE_NAME}', did);
+        }}
+        var url = new URL(window.parent.location.href);
+        if (url.searchParams.get('_did') !== did) {{
+            url.searchParams.set('_did', did);
+            window.parent.location.replace(url.toString());
+        }}
+    }})();
+    </script>
+""", height=0)
+
+device_id = st.query_params.get("_did", "")
+
+# ─────────────────────────────────────────────
+#  Session state
 # ─────────────────────────────────────────────
 if "lang"         not in st.session_state: st.session_state.lang         = "en"
 if "page"         not in st.session_state: st.session_state.page         = "home"
@@ -347,7 +432,13 @@ if "selected_med" not in st.session_state: st.session_state.selected_med = None
 if "upload_bytes" not in st.session_state: st.session_state.upload_bytes = None
 if "upload_name"  not in st.session_state: st.session_state.upload_name  = None
 if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
+if "db_loaded"    not in st.session_state: st.session_state.db_loaded    = False
 if "user_db"      not in st.session_state: st.session_state.user_db      = {}
+
+# Load from Supabase once per session (after device_id is available)
+if device_id and not st.session_state.db_loaded:
+    st.session_state.user_db  = db_load(device_id)
+    st.session_state.db_loaded = True
 
 S = STRINGS[st.session_state.lang]
 
@@ -429,7 +520,6 @@ elif st.session_state.page == "detail":
         unsafe_allow_html=True)
     st.markdown("---")
 
-    # Reference spectrum
     st.markdown(f"### {S['ref_spectrum']}")
     try:
         px, intensity = load_spectrum(MEDICINES[name]["csv"])
@@ -466,11 +556,14 @@ elif st.session_state.page == "detail":
         chosen_name = st.text_input(S["name_prompt"], value=default_name, key="name_input")
         if st.button(S["save_btn"], key="save_analyse_btn"):
             final_name = chosen_name.strip() if chosen_name.strip() else default_name
-            st.session_state.user_db[final_name] = {
+            info = {
                 "bytes":    file_bytes,
                 "filename": uploaded.name,
                 "added":    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             }
+            st.session_state.user_db[final_name] = info
+            if device_id:
+                db_save(device_id, final_name, info)   # persist to Supabase
             st.session_state.upload_name  = final_name
             st.session_state.analysis_res = None
             st.success(f"{S['name_saved']} **{final_name}**")
@@ -562,4 +655,6 @@ elif st.session_state.page == "your_medicines":
                 st.markdown("---")
         if to_delete:
             del st.session_state.user_db[to_delete]
+            if device_id:
+                db_delete(device_id, to_delete)   # persist deletion to Supabase
             st.rerun()
