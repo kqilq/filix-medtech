@@ -429,10 +429,20 @@ def ls_delete_all():
 if "lang"         not in st.session_state: st.session_state.lang         = "en"
 if "page"         not in st.session_state: st.session_state.page         = "home"
 if "selected_med" not in st.session_state: st.session_state.selected_med = None
-if "user_db"      not in st.session_state: st.session_state.user_db      = ls_load()
 if "upload_bytes" not in st.session_state: st.session_state.upload_bytes = None
 if "upload_name"  not in st.session_state: st.session_state.upload_name  = None
 if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
+if "ls_loaded"    not in st.session_state: st.session_state.ls_loaded    = False
+
+# Always try to load from localStorage on every render until we get data
+if not st.session_state.ls_loaded:
+    loaded = ls_load()
+    if loaded:
+        st.session_state.user_db   = loaded
+        st.session_state.ls_loaded = True
+    else:
+        if "user_db" not in st.session_state:
+            st.session_state.user_db = {}
 
 S = STRINGS[st.session_state.lang]
 
