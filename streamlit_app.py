@@ -221,11 +221,11 @@ def save_user_db(device_id: str, db: dict):
 # ─────────────────────────────────────────────
 COOKIE_NAME = "filix_device_id"
 
-def _inject_cookie_reader():
+def _inject_cookie_js():
     """
-    Inject JS that reads the device_id cookie and appends it to the URL
-    as ?_did=... so Python can read it on the next render.
-    Also sets the cookie if it doesn't exist yet.
+    Inject JS that reads/creates the device_id cookie and writes it
+    into the URL as ?_did=... then reloads the page so Streamlit picks it up.
+    Only runs when ?_did is not already in the URL.
     """
     st.components.v1.html(f"""
         <script>
@@ -248,9 +248,8 @@ def _inject_cookie_reader():
             var url = new URL(window.parent.location.href);
             if (url.searchParams.get('_did') !== did) {{
                 url.searchParams.set('_did', did);
-                window.parent.history.replaceState(null, '', url.toString());
-                // Trigger Streamlit rerun by posting a message
-                window.parent.dispatchEvent(new Event('popstate'));
+                // Hard reload so Streamlit sees the new query param
+                window.parent.location.replace(url.toString());
             }}
         }})();
         </script>
@@ -420,7 +419,7 @@ st.markdown("""
 #  1. Inject JS to set cookie + put ?_did=... in URL
 #  2. Read ?_did from query params → device_id
 # ─────────────────────────────────────────────
-_inject_cookie_reader()
+_inject_cookie_js()
 
 device_id = st.query_params.get("_did", "")
 if not device_id:
