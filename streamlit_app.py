@@ -395,28 +395,29 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  Device ID — stored in browser localStorage via JS component
-#  A unique ID is generated once per browser and stored permanently.
-#  It is passed to Python via st.query_params on first load.
+#  Device ID — stored in browser localStorage.
+#  JS writes the ID into the URL as ?_did=... and reloads once.
+#  On subsequent loads the ID is already in the URL — no reload needed.
 # ─────────────────────────────────────────────
-COOKIE_NAME = "filix_device_id"
+LS_KEY_DID = "filix_device_id"
 
-# Inject JS to set/read device ID and put it in URL query param
 st.components.v1.html(f"""
     <script>
     (function() {{
         function getLS(k) {{ try {{ return localStorage.getItem(k); }} catch(e) {{ return null; }} }}
         function setLS(k,v) {{ try {{ localStorage.setItem(k,v); }} catch(e) {{}} }}
-        var did = getLS('{COOKIE_NAME}');
+        var did = getLS('{LS_KEY_DID}');
         if (!did) {{
-            did = 'dev_' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-            setLS('{COOKIE_NAME}', did);
+            did = 'dev_' + Math.random().toString(36).slice(2,10) +
+                           Math.random().toString(36).slice(2,10);
+            setLS('{LS_KEY_DID}', did);
         }}
         var url = new URL(window.parent.location.href);
         if (url.searchParams.get('_did') !== did) {{
             url.searchParams.set('_did', did);
             window.parent.location.replace(url.toString());
         }}
+        // If already correct, do nothing — no reload needed
     }})();
     </script>
 """, height=0)
@@ -424,7 +425,7 @@ st.components.v1.html(f"""
 device_id = st.query_params.get("_did", "")
 
 # ─────────────────────────────────────────────
-#  Session state
+#  Session state — initialise immediately, no blocking
 # ─────────────────────────────────────────────
 if "lang"         not in st.session_state: st.session_state.lang         = "en"
 if "page"         not in st.session_state: st.session_state.page         = "home"
@@ -434,11 +435,15 @@ if "upload_name"  not in st.session_state: st.session_state.upload_name  = None
 if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
 if "db_loaded"    not in st.session_state: st.session_state.db_loaded    = False
 if "user_db"      not in st.session_state: st.session_state.user_db      = {}
+if "last_did"     not in st.session_state: st.session_state.last_did     = ""
 
-# Load from Supabase once per session (after device_id is available)
-if device_id and not st.session_state.db_loaded:
-    st.session_state.user_db  = db_load(device_id)
+# Load from Supabase once per session when device_id first becomes available
+# Also reload if device_id changes (e.g. first render had no _did, second does)
+if device_id and (not st.session_state.db_loaded or
+                  st.session_state.last_did != device_id):
+    st.session_state.user_db   = db_load(device_id)
     st.session_state.db_loaded = True
+    st.session_state.last_did  = device_id
 
 S = STRINGS[st.session_state.lang]
 
