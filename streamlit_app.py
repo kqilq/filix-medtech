@@ -16,6 +16,8 @@ import os
 import json
 import datetime
 import io
+import base64
+from streamlit_local_storage import LocalStorage
 
 # ─────────────────────────────────────────────
 #  Paths & registry
@@ -187,17 +189,37 @@ STRINGS = {
 }
 
 # ─────────────────────────────────────────────
-#  User medicine persistence  (session-based for web)
-#  Each browser session has its own private medicines.
-#  Nothing is shared between users.
+#  localStorage helpers
+#  Medicines are stored in the browser's localStorage as base64-encoded JSON.
+#  They persist across sessions on the same device/browser.
+#  Each device has its own private storage — nothing is shared between users.
 # ─────────────────────────────────────────────
-def load_user_medicines():
-    # On the web, always start from session state (empty for new users)
-    return {}
+LS_KEY = "filix_user_medicines"
 
-def save_user_medicines(db):
-    # On the web, saving is handled via st.session_state — no disk write needed
-    pass
+def db_to_storage(db):
+    """Convert in-memory db (with bytes values) to a JSON-serialisable dict."""
+    serialisable = {}
+    for name, info in db.items():
+        serialisable[name] = {
+            "b64":      base64.b64encode(info["bytes"]).decode("utf-8"),
+            "filename": info.get("filename", ""),
+            "added":    info.get("added", ""),
+        }
+    return serialisable
+
+def db_from_storage(stored):
+    """Convert stored dict back to in-memory db (with bytes values)."""
+    db = {}
+    for name, info in stored.items():
+        try:
+            db[name] = {
+                "bytes":    base64.b64decode(info["b64"]),
+                "filename": info.get("filename", ""),
+                "added":    info.get("added", ""),
+            }
+        except Exception:
+            pass
+    return db
 
 # ─────────────────────────────────────────────
 #  Data helpers
@@ -383,12 +405,31 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
+#  LocalStorage — persistent per-device storage
+# ─────────────────────────────────────────────
+_ls = LocalStorage()
+
+def ls_load():
+    """Load medicines from browser localStorage into session_state.user_db."""
+    raw = _ls.getItem(LS_KEY)
+    if raw and isinstance(raw, dict):
+        return db_from_storage(raw)
+    return {}
+
+def ls_save(db):
+    """Save medicines from session_state.user_db to browser localStorage."""
+    _ls.setItem(LS_KEY, db_to_storage(db))
+
+def ls_delete_all():
+    _ls.deleteItem(LS_KEY)
+
+# ─────────────────────────────────────────────
 #  Session state initialisation
 # ─────────────────────────────────────────────
 if "lang"         not in st.session_state: st.session_state.lang         = "en"
 if "page"         not in st.session_state: st.session_state.page         = "home"
 if "selected_med" not in st.session_state: st.session_state.selected_med = None
-if "user_db"      not in st.session_state: st.session_state.user_db      = load_user_medicines()
+if "user_db"      not in st.session_state: st.session_state.user_db      = ls_load()
 if "upload_bytes" not in st.session_state: st.session_state.upload_bytes = None
 if "upload_name"  not in st.session_state: st.session_state.upload_name  = None
 if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
@@ -527,6 +568,7 @@ elif st.session_state.page == "detail":
                 "added": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             }
             st.session_state.user_db      = user_db
+            ls_save(user_db)   # persist to browser localStorage
             st.session_state.upload_name  = final_name
             st.session_state.analysis_res = None
             st.success(f"{S['name_saved']} **{final_name}**")
@@ -644,4 +686,5 @@ elif st.session_state.page == "your_medicines":
         if to_delete:
             del user_db[to_delete]
             st.session_state.user_db = user_db
+            ls_save(user_db)   # persist deletion to browser localStorage
             st.rerun()
