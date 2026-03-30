@@ -1,6 +1,5 @@
 """
 Filix Medtech – NIR Spectrum Viewer  (Streamlit web version)
-Persistent per-device storage via Supabase.
 """
 
 import streamlit as st
@@ -13,9 +12,7 @@ import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use("Agg")
 import os
-import datetime
 import io
-import base64
 
 # ─────────────────────────────────────────────
 #  Paths & registry
@@ -42,21 +39,14 @@ MEDICINES = {
 STRINGS = {
     "en": {
         "app_title":         "Filix Medtech – NIR Spectrum Viewer",
-        "welcome":           "Welcome",
-        "what_to_do":        "What would you like to do?",
-        "list_medicines":    "📋 List of Medicines",
-        "your_medicines":    "🧪 Your Medicines",
-        "back_home":         "🏠 Back to Home",
-        "back_list":         "← Back to List",
         "list_title":        "List of Medicines",
+        "list_subtitle":     "Select a medicine to view its spectrum and compare with your sample.",
         "view_spectrum":     "View Medicine Info",
+        "back_list":         "← Back to List",
         "ref_spectrum":      "Reference Spectrum",
         "upload_section":    "Compare with your CSV",
         "upload_note":       "ℹ️ Please upload a CSV file exported from LSCollector.",
         "upload_btn":        "Upload CSV",
-        "from_saved":        "Or choose from Your Medicines:",
-        "no_saved":          "No saved medicines yet.",
-        "use_this":          "Use this",
         "clear_btn":         "Clear uploaded file",
         "analysis_title":    "Analysis Results",
         "degree":            "Degree",
@@ -68,18 +58,10 @@ STRINGS = {
         "self_acc":          "Self accuracy (R²)",
         "test_acc":          "Test accuracy (R²)",
         "similarity":        "Similarity",
-        "how_to_read":       "ℹ️ How to read these results",
-        "your_med_title":    "Your Medicines",
-        "no_saved_msg":      "No medicines saved yet. Upload a CSV from any medicine's detail page.",
-        "file_lbl":          "File:",
-        "added_lbl":         "Added:",
-        "delete_btn":        "🗑 Delete",
-        "name_prompt":       "Name for this medicine (leave blank to use filename):",
-        "save_btn":          "Save & Analyse",
-        "name_saved":        "Saved as:",
-        "language_btn":      "繁體中文",
-        "running":           "⏳ Running analysis…",
         "similarity_result": "🎯 Similarity",
+        "how_to_read":       "ℹ️ How to read these results",
+        "running":           "⏳ Running analysis…",
+        "language_btn":      "繁體中文",
         "explanations": [
             ("📐 Polynomial Degree",
              "The spectrum curve is fitted using a polynomial equation. A higher degree means a more complex curve. "
@@ -111,21 +93,14 @@ STRINGS = {
     },
     "zh": {
         "app_title":         "Filix Medtech – 近紅外光譜檢視器",
-        "welcome":           "歡迎使用",
-        "what_to_do":        "請選擇您想進行的操作：",
-        "list_medicines":    "📋 藥品列表",
-        "your_medicines":    "🧪 我的藥品",
-        "back_home":         "🏠 返回主頁",
-        "back_list":         "← 返回列表",
         "list_title":        "藥品列表",
+        "list_subtitle":     "選擇藥品以查看其光譜並與您的樣本比較。",
         "view_spectrum":     "查看藥品資訊",
+        "back_list":         "← 返回列表",
         "ref_spectrum":      "參考光譜",
         "upload_section":    "與您的 CSV 比較",
         "upload_note":       "ℹ️ 請上傳從 LSCollector 匯出的 CSV 檔案。",
         "upload_btn":        "上傳 CSV",
-        "from_saved":        "或從我的藥品中選取：",
-        "no_saved":          "尚未儲存任何藥品。",
-        "use_this":          "使用此藥品",
         "clear_btn":         "清除已上傳檔案",
         "analysis_title":    "分析結果",
         "degree":            "階數",
@@ -137,18 +112,10 @@ STRINGS = {
         "self_acc":          "自身準確度 (R²)",
         "test_acc":          "測試準確度 (R²)",
         "similarity":        "相似度",
-        "how_to_read":       "ℹ️ 如何解讀分析結果",
-        "your_med_title":    "我的藥品",
-        "no_saved_msg":      "尚未儲存任何藥品。請在藥品詳細頁面上傳 CSV 檔案。",
-        "file_lbl":          "檔案：",
-        "added_lbl":         "新增時間：",
-        "delete_btn":        "🗑 刪除",
-        "name_prompt":       "為此藥品命名（留空則使用檔案名稱）：",
-        "save_btn":          "儲存並分析",
-        "name_saved":        "已儲存為：",
-        "language_btn":      "English",
-        "running":           "⏳ 正在分析中…",
         "similarity_result": "🎯 相似度",
+        "how_to_read":       "ℹ️ 如何解讀分析結果",
+        "running":           "⏳ 正在分析中…",
+        "language_btn":      "English",
         "explanations": [
             ("📐 多項式階數（Polynomial Degree）",
              "光譜曲線以多項式方程式進行擬合。階數越高，曲線越複雜。"
@@ -179,61 +146,6 @@ STRINGS = {
         ],
     },
 }
-
-# ─────────────────────────────────────────────
-#  Supabase client (credentials from st.secrets)
-# ─────────────────────────────────────────────
-@st.cache_resource
-def get_supabase():
-    from supabase import create_client
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
-
-def db_load(device_id: str) -> dict:
-    """Load all medicines for this device from Supabase."""
-    try:
-        sb = get_supabase()
-        rows = sb.table("user_medicines") \
-                 .select("name,filename,added,csv_data") \
-                 .eq("device_id", device_id) \
-                 .execute().data
-        result = {}
-        for row in rows:
-            result[row["name"]] = {
-                "bytes":    base64.b64decode(row["csv_data"]),
-                "filename": row["filename"],
-                "added":    row["added"],
-            }
-        return result
-    except Exception:
-        return {}
-
-def db_save(device_id: str, name: str, info: dict):
-    """Upsert one medicine for this device into Supabase."""
-    try:
-        sb = get_supabase()
-        sb.table("user_medicines").upsert({
-            "device_id": device_id,
-            "name":      name,
-            "filename":  info.get("filename", ""),
-            "added":     info.get("added", ""),
-            "csv_data":  base64.b64encode(info["bytes"]).decode(),
-        }, on_conflict="device_id,name").execute()
-    except Exception:
-        pass
-
-def db_delete(device_id: str, name: str):
-    """Delete one medicine for this device from Supabase."""
-    try:
-        sb = get_supabase()
-        sb.table("user_medicines") \
-          .delete() \
-          .eq("device_id", device_id) \
-          .eq("name", name) \
-          .execute()
-    except Exception:
-        pass
 
 # ─────────────────────────────────────────────
 #  Data helpers
@@ -360,26 +272,25 @@ st.markdown("""
     h1 { font-size: 2rem !important; }
     h2 { font-size: 1.7rem !important; }
     h3 { font-size: 1.4rem !important; }
-    h4 { font-size: 1.2rem !important; }
     p, label, .stMarkdown, .stCaption,
     .stText, div[data-testid="stMarkdownContainer"] p {
         font-size: 1.05rem !important;
         line-height: 1.6 !important;
     }
     .stButton > button {
-        font-size: 1.35rem !important;
-        padding: 0.7rem 1.6rem !important;
+        font-size: 1.2rem !important;
+        padding: 0.6rem 1.4rem !important;
     }
     [data-testid="stMetricLabel"] { font-size: 1rem !important; }
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
     .stDataFrame { font-size: 1rem !important; }
-    .stSelectbox label, .stTextInput label { font-size: 1.05rem !important; }
     .med-card {
         background: white; border: 1px solid #ddd;
-        border-radius: 8px; padding: 18px 22px; margin-bottom: 14px;
+        border-radius: 10px; padding: 20px 24px; margin-bottom: 16px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
     }
     .med-card h3 { margin: 0 0 6px 0; color: #3a3a5c; font-size: 1.3rem; }
-    .med-card p  { margin: 0 0 10px 0; color: #555; font-size: 1.25rem; }
+    .med-card p  { margin: 0 0 12px 0; color: #555; font-size: 1.05rem; }
     .info-note {
         background: #eef4fb; border: 1px solid #b0cce8;
         border-radius: 6px; padding: 10px 16px;
@@ -395,43 +306,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  Session state — initialise immediately
+#  Session state
 # ─────────────────────────────────────────────
 if "lang"         not in st.session_state: st.session_state.lang         = "en"
-if "page"         not in st.session_state: st.session_state.page         = "home"
+if "page"         not in st.session_state: st.session_state.page         = "list"
 if "selected_med" not in st.session_state: st.session_state.selected_med = None
 if "upload_bytes" not in st.session_state: st.session_state.upload_bytes = None
-if "upload_name"  not in st.session_state: st.session_state.upload_name  = None
 if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
-if "db_loaded"    not in st.session_state: st.session_state.db_loaded    = False
-if "user_db"      not in st.session_state: st.session_state.user_db      = {}
-if "device_id"    not in st.session_state: st.session_state.device_id    = ""
-
-# ─────────────────────────────────────────────
-#  User identity — simple name/PIN login
-#  The user enters a name (e.g. "kaila-phone") once.
-#  This is stored in session_state and used as the Supabase key.
-#  No JS, no cookies, no localStorage — works on every device.
-# ─────────────────────────────────────────────
-device_id = st.session_state.device_id
-
-if not device_id:
-    # Show a compact login form in the sidebar
-    with st.sidebar:
-        st.markdown("### 🔑 Your Profile")
-        st.caption("Enter a name to save & retrieve your medicines across sessions.")
-        name_input = st.text_input("Your name / device name:", 
-                                    placeholder="e.g. kaila-phone",
-                                    key="login_name_input")
-        if st.button("Continue →", key="login_btn") and name_input.strip():
-            st.session_state.device_id = name_input.strip().lower().replace(" ", "-")
-            st.session_state.db_loaded = False
-            st.rerun()
-        st.info("💡 Use the same name on every device to access your saved medicines.")
-
-if device_id and not st.session_state.db_loaded:
-    st.session_state.user_db   = db_load(device_id)
-    st.session_state.db_loaded = True
 
 S = STRINGS[st.session_state.lang]
 
@@ -455,64 +336,47 @@ with col_lang:
 st.markdown("<hr style='margin:0 0 16px 0'>", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  Navigation helper
+#  LIST PAGE (default landing page)
 # ─────────────────────────────────────────────
-def goto(page, med=None):
-    st.session_state.page         = page
-    st.session_state.selected_med = med
-    st.session_state.upload_bytes = None
-    st.session_state.upload_name  = None
-    st.session_state.analysis_res = None
-
-# ─────────────────────────────────────────────
-#  HOME PAGE
-# ─────────────────────────────────────────────
-if st.session_state.page == "home":
-    st.markdown(f"## {S['welcome']}")
-    st.markdown(f"#### {S['what_to_do']}")
-    st.write("")
-    c1, c2, c3 = st.columns([1, 2, 1])
-    with c2:
-        if st.button(S["list_medicines"], use_container_width=True, key="btn_list"):
-            goto("list"); st.rerun()
-        st.write("")
-        if st.button(S["your_medicines"], use_container_width=True, key="btn_your"):
-            goto("your_medicines"); st.rerun()
-
-# ─────────────────────────────────────────────
-#  LIST PAGE
-# ─────────────────────────────────────────────
-elif st.session_state.page == "list":
-    if st.button(S["back_home"], key="back_home_list"):
-        goto("home"); st.rerun()
+if st.session_state.page == "list":
     st.markdown(f"## {S['list_title']}")
+    st.markdown(f"<p style='color:#555;margin-top:-8px'>{S['list_subtitle']}</p>",
+                unsafe_allow_html=True)
     st.markdown("---")
     for name, info in MEDICINES.items():
         desc = info["description_zh"] if st.session_state.lang == "zh" else info["description"]
         st.markdown(f'<div class="med-card"><h3>{name}</h3><p>{desc}</p></div>',
                     unsafe_allow_html=True)
         if st.button(S["view_spectrum"], key=f"view_{name}"):
-            goto("detail", med=name); st.rerun()
+            st.session_state.page         = "detail"
+            st.session_state.selected_med = name
+            st.session_state.upload_bytes = None
+            st.session_state.analysis_res = None
+            st.rerun()
 
 # ─────────────────────────────────────────────
 #  DETAIL PAGE
 # ─────────────────────────────────────────────
 elif st.session_state.page == "detail":
     name = st.session_state.selected_med
-    col_back, col_title_d = st.columns([0.2, 0.8])
+    col_back, col_title_d = st.columns([0.18, 0.82])
     with col_back:
         if st.button(S["back_list"], key="back_list_btn"):
-            goto("list"); st.rerun()
+            st.session_state.page         = "list"
+            st.session_state.upload_bytes = None
+            st.session_state.analysis_res = None
+            st.rerun()
     with col_title_d:
         st.markdown(f"## {name}")
 
     desc_key = "description_zh" if st.session_state.lang == "zh" else "description"
     st.markdown(
-        f"<p style='font-size:1.25rem;color:#555;margin-top:-8px'>"
+        f"<p style='font-size:1.1rem;color:#555;margin-top:-8px'>"
         f"{MEDICINES[name][desc_key]}</p>",
         unsafe_allow_html=True)
     st.markdown("---")
 
+    # Reference spectrum
     st.markdown(f"### {S['ref_spectrum']}")
     try:
         px, intensity = load_spectrum(MEDICINES[name]["csv"])
@@ -527,57 +391,29 @@ elif st.session_state.page == "detail":
 
     uploaded = st.file_uploader(S["upload_btn"], type=["csv"], key="uploader")
 
-    user_db = st.session_state.user_db
-    if user_db:
-        st.markdown(f"**{S['from_saved']}**")
-        saved_names  = list(user_db.keys())
-        chosen_saved = st.selectbox(S["from_saved"], ["—"] + saved_names,
-                                    label_visibility="visible", key="saved_sel")
-        if chosen_saved != "—":
-            if st.button(S["use_this"], key="use_saved_btn"):
-                st.session_state.upload_bytes = user_db[chosen_saved]["bytes"]
-                st.session_state.upload_name  = chosen_saved
-                st.session_state.analysis_res = None
-                st.rerun()
-    else:
-        st.caption(S["no_saved"])
-
     if uploaded is not None:
-        file_bytes   = uploaded.read()
-        default_name = os.path.splitext(uploaded.name)[0]
-        st.session_state.upload_bytes = file_bytes
-        chosen_name = st.text_input(S["name_prompt"], value=default_name, key="name_input")
-        if st.button(S["save_btn"], key="save_analyse_btn"):
-            final_name = chosen_name.strip() if chosen_name.strip() else default_name
-            info = {
-                "bytes":    file_bytes,
-                "filename": uploaded.name,
-                "added":    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-            }
-            st.session_state.user_db[final_name] = info
-            if device_id:
-                db_save(device_id, final_name, info)   # persist to Supabase
-            st.session_state.upload_name  = final_name
+        file_bytes = uploaded.read()
+        if file_bytes != st.session_state.upload_bytes:
+            st.session_state.upload_bytes = file_bytes
             st.session_state.analysis_res = None
-            st.success(f"{S['name_saved']} **{final_name}**")
-            st.rerun()
 
     if st.session_state.upload_bytes is not None:
-        display_name = st.session_state.upload_name or "Sample"
         if st.button(S["clear_btn"], key="clear_btn"):
             st.session_state.upload_bytes = None
-            st.session_state.upload_name  = None
             st.session_state.analysis_res = None
             st.rerun()
-        st.markdown(f"**{display_name}**")
+
+        # Show uploaded spectrum
         try:
             u_px, u_int = load_spectrum(st.session_state.upload_bytes, from_bytes=True)
             fig_user = make_spectrum_fig(u_px, u_int,
-                                         f"{display_name} — Pixel vs. Intensity", "darkorange")
+                                         f"{uploaded.name if uploaded else 'Sample'} — Pixel vs. Intensity",
+                                         "darkorange")
             st.pyplot(fig_user); plt.close(fig_user)
         except Exception as e:
             st.error(f"Could not load sample spectrum: {e}")
 
+        # Run analysis
         if st.session_state.analysis_res is None:
             with st.spinner(S["running"]):
                 try:
@@ -612,42 +448,3 @@ elif st.session_state.page == "detail":
                     st.markdown(f"**{title}**")
                     st.markdown(desc)
                     st.markdown("---")
-
-# ─────────────────────────────────────────────
-#  YOUR MEDICINES PAGE
-# ─────────────────────────────────────────────
-elif st.session_state.page == "your_medicines":
-    if st.button(S["back_home"], key="back_home_your"):
-        goto("home"); st.rerun()
-    st.markdown(f"## {S['your_med_title']}")
-    st.markdown("---")
-
-    user_db = st.session_state.user_db
-    if not user_db:
-        st.info(S["no_saved_msg"])
-    else:
-        to_delete = None
-        for med_name, info in user_db.items():
-            with st.container():
-                col_name, col_del = st.columns([0.85, 0.15])
-                with col_name:
-                    st.markdown(f"**{med_name}**")
-                    st.caption(f"{S['file_lbl']} {info.get('filename','?')}  |  "
-                               f"{S['added_lbl']} {info.get('added','?')}")
-                with col_del:
-                    if st.button(S["delete_btn"], key=f"del_{med_name}"):
-                        to_delete = med_name
-                if st.button(S["view_spectrum"], key=f"view_saved_{med_name}"):
-                    try:
-                        px, intensity = load_spectrum(info["bytes"], from_bytes=True)
-                        fig = make_spectrum_fig(px, intensity,
-                                               f"{med_name} — Pixel vs. Intensity", "darkorange")
-                        st.pyplot(fig); plt.close(fig)
-                    except Exception as e:
-                        st.error(str(e))
-                st.markdown("---")
-        if to_delete:
-            del st.session_state.user_db[to_delete]
-            if device_id:
-                db_delete(device_id, to_delete)   # persist deletion to Supabase
-            st.rerun()
