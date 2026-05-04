@@ -14,6 +14,7 @@ matplotlib.use("Agg")
 import os
 import io
 import datetime
+import json
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -30,21 +31,40 @@ from reportlab.pdfbase.ttfonts import TTFont
 # ─────────────────────────────────────────────
 #  Paths & registry
 # ─────────────────────────────────────────────
-BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
-LOGO_PATH = os.path.join(BASE_DIR, "filix_logo.png")
+BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
+LOGO_PATH       = os.path.join(BASE_DIR, "filix_logo.png")
+MEDICINES_JSON  = os.path.join(BASE_DIR, "medicines.json")
+MEDICINES_DATA  = os.path.join(BASE_DIR, "medicines_data")
 
-MEDICINES = {
-    "Medicine 1": {
-        "csv": os.path.join(BASE_DIR, "medicine1.csv"),
-        "description": "NIR spectrum captured with LinkSquare device. Wavelength range: ~704 – 1088 nm",
-        "description_zh": "以 LinkSquare 裝置擷取的近紅外光譜。波長範圍：約 704 – 1088 nm",
-    },
-    "Medicine 2": {
-        "csv": os.path.join(BASE_DIR, "medicine2.csv"),
-        "description": "NIR spectrum captured with LinkSquare device. Wavelength range: ~704 – 1088 nm",
-        "description_zh": "以 LinkSquare 裝置擷取的近紅外光譜。波長範圍：約 704 – 1088 nm",
-    },
-}
+# ─────────────────────────────────────────────
+#  Load medicines from JSON (persistent)
+# ─────────────────────────────────────────────
+def load_medicines():
+    """Load the medicines registry from medicines.json."""
+    if not os.path.exists(MEDICINES_JSON):
+        return {}
+    with open(MEDICINES_JSON, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    result = {}
+    for entry in data.get("medicines", []):
+        csv_filename = entry["csv"]
+        # Support both absolute paths and filenames relative to BASE_DIR or medicines_data/
+        if os.path.isabs(csv_filename):
+            csv_path = csv_filename
+        elif os.path.exists(os.path.join(BASE_DIR, csv_filename)):
+            csv_path = os.path.join(BASE_DIR, csv_filename)
+        elif os.path.exists(os.path.join(MEDICINES_DATA, csv_filename)):
+            csv_path = os.path.join(MEDICINES_DATA, csv_filename)
+        else:
+            csv_path = os.path.join(BASE_DIR, csv_filename)
+        result[entry["name"]] = {
+            "csv":            csv_path,
+            "description":    entry.get("description", ""),
+            "description_zh": entry.get("description_zh", ""),
+        }
+    return result
+
+MEDICINES = load_medicines()
 
 # ─────────────────────────────────────────────
 #  Localisation
