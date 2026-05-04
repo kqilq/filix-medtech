@@ -1,5 +1,6 @@
 """
-Filix Medtech – NIR Spectrum Viewer  (Streamlit web version)
+Filix Medtech – NIR Spectrum Viewer + Admin Panel (single app)
+Home screen lets you choose User or Admin mode.
 """
 
 import streamlit as st
@@ -11,67 +12,55 @@ from sklearn.preprocessing import PolynomialFeatures
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use("Agg")
-import os
-import io
-import datetime
-import json
+import os, io, datetime, json, base64, re
+import requests
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.lib.units import cm
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER
 from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
                                  Image as RLImage, Table, TableStyle,
-                                 HRFlowable, KeepTogether)
-from reportlab.platypus import PageBreak
+                                 HRFlowable, PageBreak)
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ─────────────────────────────────────────────
-#  Paths & registry
+#  Paths
 # ─────────────────────────────────────────────
-BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-LOGO_PATH       = os.path.join(BASE_DIR, "filix_logo.png")
-MEDICINES_JSON  = os.path.join(BASE_DIR, "medicines.json")
-MEDICINES_DATA  = os.path.join(BASE_DIR, "medicines_data")
+BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
+LOGO_PATH      = os.path.join(BASE_DIR, "filix_logo.png")
+MEDICINES_JSON = os.path.join(BASE_DIR, "medicines.json")
+MEDICINES_DATA = os.path.join(BASE_DIR, "medicines_data")
 
 # ─────────────────────────────────────────────
-#  GitHub API helpers (for Streamlit Cloud)
+#  GitHub API helpers
 # ─────────────────────────────────────────────
-import base64
-import requests
-
 GITHUB_REPO   = "kqilq/filix-medtech"
 GITHUB_BRANCH = "main"
 DATA_FOLDER   = "medicines_data"
 
 def _gh_token():
-    try:
-        return st.secrets["GITHUB_TOKEN"]
-    except Exception:
-        return os.environ.get("GITHUB_TOKEN", "")
+    try:    return st.secrets["GITHUB_TOKEN"]
+    except: return os.environ.get("GITHUB_TOKEN", "")
 
 def _gh_headers():
-    token = _gh_token()
-    if token:
-        return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-    return {"Accept": "application/vnd.github.v3+json"}
+    t = _gh_token()
+    h = {"Accept": "application/vnd.github.v3+json"}
+    if t: h["Authorization"] = f"token {t}"
+    return h
 
 def _gh_api(path):
     return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
 
 def gh_read_json_medicines():
-    """Read medicines list from GitHub repo's medicines.json."""
     r = requests.get(_gh_api("medicines.json"), headers=_gh_headers(),
                      params={"ref": GITHUB_BRANCH})
-    if r.status_code != 200:
-        return None
-    content = base64.b64decode(r.json()["content"]).decode("utf-8")
-    return json.loads(content).get("medicines", [])
+    if r.status_code != 200: return None
+    return json.loads(base64.b64decode(r.json()["content"]).decode()).get("medicines", [])
 
 def gh_read_csv_bytes(filename):
-    """Read a CSV file from GitHub repo, returns bytes or None."""
     for path in [f"{DATA_FOLDER}/{filename}", filename]:
         r = requests.get(_gh_api(path), headers=_gh_headers(),
                          params={"ref": GITHUB_BRANCH})
@@ -79,82 +68,97 @@ def gh_read_csv_bytes(filename):
             return base64.b64decode(r.json()["content"])
     return None
 
+def gh_read_json_full():
+    r = requests.get(_gh_api("medicines.json"), headers=_gh_headers(),
+                     params={"ref": GITHUB_BRANCH})
+    if r.status_code == 404: return [], None
+    r.raise_for_status()
+    data = r.json()
+    medicines = json.loads(base64.b64decode(data["content"]).decode()).get("medicines", [])
+    return medicines, data["sha"]
+
+def gh_write_json(medicines_list, sha, message):
+    content = json.dumps({"medicines": medicines_list}, ensure_ascii=False, indent=2)
+    encoded = base64.b64encode(content.encode()).decode()
+    payload = {"message": message, "content": encoded, "branch": GITHUB_BRANCH}
+    if sha: payload["sha"] = sha
+    r = requests.put(_gh_api("medicines.json"), headers=_gh_headers(), json=payload)
+    r.raise_for_status()
+
+def gh_upload_csv(filename, csv_bytes, message):
+    path = f"{DATA_FOLDER}/{filename}"
+    r = requests.get(_gh_api(path), headers=_gh_headers(), params={"ref": GITHUB_BRANCH})
+    sha = r.json().get("sha") if r.status_code == 200 else None
+    encoded = base64.b64encode(csv_bytes).decode()
+    payload = {"message": message, "content": encoded, "branch": GITHUB_BRANCH}
+    if sha: payload["sha"] = sha
+    r = requests.put(_gh_api(path), headers=_gh_headers(), json=payload)
+    r.raise_for_status()
+
+def gh_get_file_sha(path):
+    r = requests.get(_gh_api(path), headers=_gh_headers(), params={"ref": GITHUB_BRANCH})
+    return r.json().get("sha") if r.status_code == 200 else None
+
+def gh_delete_file(path, sha, message):
+    r = requests.delete(_gh_api(path), headers=_gh_headers(),
+                        json={"message": message, "sha": sha, "branch": GITHUB_BRANCH})
+    r.raise_for_status()
+
 # ─────────────────────────────────────────────
-#  Load medicines (GitHub API preferred, local fallback)
+#  Load medicines
 # ─────────────────────────────────────────────
 def load_medicines():
-    """Load medicines from GitHub API (Streamlit Cloud) or local JSON (local dev)."""
-    # Try GitHub API first
     try:
         entries = gh_read_json_medicines()
         if entries is not None:
-            result = {}
-            for entry in entries:
-                result[entry["name"]] = {
-                    "csv":            entry["csv"],   # filename only; fetched via GitHub API
-                    "description":    entry.get("description", ""),
-                    "description_zh": entry.get("description_zh", ""),
-                    "from_github":    True,
-                }
-            return result
-    except Exception:
-        pass
-
-    # Fallback: local medicines.json
-    if not os.path.exists(MEDICINES_JSON):
-        return {}
+            return {e["name"]: {
+                "csv": e["csv"], "description": e.get("description",""),
+                "description_zh": e.get("description_zh",""), "from_github": True,
+            } for e in entries}
+    except: pass
+    if not os.path.exists(MEDICINES_JSON): return {}
     with open(MEDICINES_JSON, "r", encoding="utf-8") as f:
         data = json.load(f)
     result = {}
-    for entry in data.get("medicines", []):
-        csv_filename = entry["csv"]
-        if os.path.isabs(csv_filename):
-            csv_path = csv_filename
-        elif os.path.exists(os.path.join(BASE_DIR, csv_filename)):
-            csv_path = os.path.join(BASE_DIR, csv_filename)
-        elif os.path.exists(os.path.join(MEDICINES_DATA, csv_filename)):
-            csv_path = os.path.join(MEDICINES_DATA, csv_filename)
-        else:
-            csv_path = os.path.join(BASE_DIR, csv_filename)
-        result[entry["name"]] = {
-            "csv":            csv_path,
-            "description":    entry.get("description", ""),
-            "description_zh": entry.get("description_zh", ""),
-            "from_github":    False,
-        }
+    for e in data.get("medicines", []):
+        fn = e["csv"]
+        if os.path.isabs(fn): p = fn
+        elif os.path.exists(os.path.join(BASE_DIR, fn)): p = os.path.join(BASE_DIR, fn)
+        elif os.path.exists(os.path.join(MEDICINES_DATA, fn)): p = os.path.join(MEDICINES_DATA, fn)
+        else: p = os.path.join(BASE_DIR, fn)
+        result[e["name"]] = {"csv": p, "description": e.get("description",""),
+                              "description_zh": e.get("description_zh",""), "from_github": False}
     return result
 
-MEDICINES = load_medicines()
+def _get_csv_bytes(med_info):
+    if med_info.get("from_github"):
+        data = gh_read_csv_bytes(med_info["csv"])
+        if data is None: raise FileNotFoundError(f"CSV not found: {med_info['csv']}")
+        return data
+    with open(med_info["csv"], "rb") as f: return f.read()
 
 # ─────────────────────────────────────────────
 #  Localisation
 # ─────────────────────────────────────────────
 STRINGS = {
     "en": {
-        "app_title":         "Filix Medtech – NIR Spectrum Viewer",
-        "list_title":        "List of Medicines",
-        "list_subtitle":     "Select a medicine to view its spectrum and compare with your sample.",
-        "view_spectrum":     "View Medicine Info",
-        "back_list":         "← Back to List",
-        "ref_spectrum":      "Reference Spectrum",
-        "upload_section":    "Compare with your CSV",
-        "upload_note":       "ℹ️ Please upload a CSV file exported from LSCollector.",
-        "upload_btn":        "Upload CSV",
-        "clear_btn":         "Clear uploaded file",
-        "analysis_title":    "Analysis Results",
-        "degree":            "Degree",
-        "adj_r2":            "Adj. R²",
-        "r2":                "R²",
-        "ratio":             "Adj.R²/R² (%)",
-        "chosen_degree":     "Chosen best degree",
-        "best_ratio":        "Best degree ratio to 100%",
-        "self_acc":          "Self accuracy (R²)",
-        "test_acc":          "Test accuracy (R²)",
-        "similarity":        "Similarity",
-        "similarity_result": "🎯 Similarity",
-        "how_to_read":       "ℹ️ How to read these results",
-        "running":           "⏳ Running analysis…",
-        "language_btn":      "繁體中文",
+        "app_title": "Filix Medtech – NIR Spectrum Viewer",
+        "list_title": "List of Medicines",
+        "list_subtitle": "Select a medicine to view its spectrum and compare with your sample.",
+        "view_spectrum": "View Medicine Info",
+        "back_list": "← Back to List",
+        "ref_spectrum": "Reference Spectrum",
+        "upload_section": "Compare with your CSV",
+        "upload_note": "ℹ️ Please upload a CSV file exported from LSCollector.",
+        "upload_btn": "Upload CSV",
+        "clear_btn": "Clear uploaded file",
+        "analysis_title": "Analysis Results",
+        "degree": "Degree", "adj_r2": "Adj. R²", "r2": "R²", "ratio": "Adj.R²/R² (%)",
+        "chosen_degree": "Chosen best degree", "best_ratio": "Best degree ratio to 100%",
+        "self_acc": "Self accuracy (R²)", "test_acc": "Test accuracy (R²)",
+        "similarity": "Similarity", "similarity_result": "🎯 Similarity",
+        "how_to_read": "ℹ️ How to read these results",
+        "running": "⏳ Running analysis…", "language_btn": "繁體中文",
         "explanations": [
             ("📐 Polynomial Degree",
              "The spectrum curve is fitted using a polynomial equation. A higher degree means a more complex curve. "
@@ -185,30 +189,19 @@ STRINGS = {
         ],
     },
     "zh": {
-        "app_title":         "Filix Medtech – 近紅外光譜檢視器",
-        "list_title":        "藥品列表",
-        "list_subtitle":     "選擇藥品以查看其光譜並與您的樣本比較。",
-        "view_spectrum":     "查看藥品資訊",
-        "back_list":         "← 返回列表",
-        "ref_spectrum":      "參考光譜",
-        "upload_section":    "與您的 CSV 比較",
-        "upload_note":       "ℹ️ 請上傳從 LSCollector 匯出的 CSV 檔案。",
-        "upload_btn":        "上傳 CSV",
-        "clear_btn":         "清除已上傳檔案",
-        "analysis_title":    "分析結果",
-        "degree":            "階數",
-        "adj_r2":            "Adj. R²",
-        "r2":                "R²",
-        "ratio":             "Adj.R²/R² (%)",
-        "chosen_degree":     "最佳階數",
-        "best_ratio":        "最佳階數與 100% 的比率",
-        "self_acc":          "自身準確度 (R²)",
-        "test_acc":          "測試準確度 (R²)",
-        "similarity":        "相似度",
-        "similarity_result": "🎯 相似度",
-        "how_to_read":       "ℹ️ 如何解讀分析結果",
-        "running":           "⏳ 正在分析中…",
-        "language_btn":      "English",
+        "app_title": "Filix Medtech – 近紅外光譜檢視器",
+        "list_title": "藥品列表",
+        "list_subtitle": "選擇藥品以查看其光譜並與您的樣本比較。",
+        "view_spectrum": "查看藥品資訊", "back_list": "← 返回列表",
+        "ref_spectrum": "參考光譜", "upload_section": "與您的 CSV 比較",
+        "upload_note": "ℹ️ 請上傳從 LSCollector 匯出的 CSV 檔案。",
+        "upload_btn": "上傳 CSV", "clear_btn": "清除已上傳檔案",
+        "analysis_title": "分析結果", "degree": "階數", "adj_r2": "Adj. R²",
+        "r2": "R²", "ratio": "Adj.R²/R² (%)", "chosen_degree": "最佳階數",
+        "best_ratio": "最佳階數與 100% 的比率", "self_acc": "自身準確度 (R²)",
+        "test_acc": "測試準確度 (R²)", "similarity": "相似度",
+        "similarity_result": "🎯 相似度", "how_to_read": "ℹ️ 如何解讀分析結果",
+        "running": "⏳ 正在分析中…", "language_btn": "English",
         "explanations": [
             ("📐 多項式階數（Polynomial Degree）",
              "光譜曲線以多項式方程式進行擬合。階數越高，曲線越複雜。"
@@ -241,116 +234,74 @@ STRINGS = {
 }
 
 # ─────────────────────────────────────────────
-#  Data helpers
+#  Analysis helpers
 # ─────────────────────────────────────────────
-def _get_csv_bytes(med_info):
-    """Get CSV bytes for a medicine, from GitHub API or local file."""
-    if med_info.get("from_github"):
-        data = gh_read_csv_bytes(med_info["csv"])
-        if data is None:
-            raise FileNotFoundError(f"CSV not found in GitHub repo: {med_info['csv']}")
-        return data
-    else:
-        with open(med_info["csv"], "rb") as f:
-            return f.read()
-
-def clean_file(path_or_bytes, from_bytes=False):
-    if from_bytes:
-        df = pd.read_csv(io.BytesIO(path_or_bytes), index_col=0)
-    else:
-        df = pd.read_csv(path_or_bytes, index_col=0)
+def clean_file(b):
+    df = pd.read_csv(io.BytesIO(b), index_col=0)
     df_T = df.transpose()
-    mean_intensity = df_T.mean(axis=1, skipna=True)
-    cleaned = pd.DataFrame({
-        "Wavelength": df_T.index.astype(float),
-        "Intensity":  mean_intensity.values,
-    })
-    return cleaned.sort_values(by="Wavelength")
+    mi = df_T.mean(axis=1, skipna=True)
+    return pd.DataFrame({"Wavelength": df_T.index.astype(float), "Intensity": mi.values}).sort_values("Wavelength")
 
-def load_spectrum(path_or_bytes, from_bytes=False):
-    if from_bytes:
-        df = pd.read_csv(io.BytesIO(path_or_bytes), header=0)
-    else:
-        df = pd.read_csv(path_or_bytes, header=0)
-    intensity_row    = df.iloc[0, 1:]
-    intensity_values = intensity_row.astype(float).values
-    return list(range(len(intensity_values))), intensity_values
+def load_spectrum(b):
+    df = pd.read_csv(io.BytesIO(b), header=0)
+    iv = df.iloc[0, 1:].astype(float).values
+    return list(range(len(iv))), iv
 
 def legendre_features(x, degree):
-    x_scaled = 2 * (x - np.min(x)) / (np.max(x) - np.min(x)) - 1
-    return legendre.legvander(x_scaled, degree)
+    xs = 2*(x-np.min(x))/(np.max(x)-np.min(x))-1
+    return legendre.legvander(xs, degree)
 
-def run_analysis(standard_bytes, test_bytes):
-    standard   = clean_file(standard_bytes, from_bytes=True)
-    test       = clean_file(test_bytes, from_bytes=True)
-    wavelength = standard["Wavelength"].values
-    intensity  = standard["Intensity"].values
-    valid_degrees, adj_r2s = [], []
-    stop_found = False
+def run_analysis(std_bytes, test_bytes):
+    standard = clean_file(std_bytes)
+    test     = clean_file(test_bytes)
+    wl = standard["Wavelength"].values
+    intensity = standard["Intensity"].values
+    valid_degrees, adj_r2s, stop_found = [], [], False
     for degree in range(2, 11):
-        XX_poly = legendre_features(wavelength, degree)[:, 1:]
-        XX      = sm.add_constant(XX_poly)
-        model   = sm.OLS(intensity, XX).fit()
-        pvals   = model.pvalues[1:]
-        if np.all(pvals < 0.001) and not stop_found:
-            valid_degrees.append(degree)
-            adj_r2s.append(model.rsquared_adj)
+        XX = sm.add_constant(legendre_features(wl, degree)[:, 1:])
+        model = sm.OLS(intensity, XX).fit()
+        if np.all(model.pvalues[1:] < 0.001) and not stop_found:
+            valid_degrees.append(degree); adj_r2s.append(model.rsquared_adj)
         elif not stop_found:
             stop_found = True
-    if not valid_degrees:
-        raise ValueError("No valid polynomial degrees found.")
-    X = standard[["Wavelength"]].values
-    y = standard["Intensity"].values
+    if not valid_degrees: raise ValueError("No valid polynomial degrees found.")
+    X = standard[["Wavelength"]].values; y = standard["Intensity"].values
     r_square, ratios = [], []
     for idx, degree in enumerate(valid_degrees):
-        poly_reg = PolynomialFeatures(degree=degree)
-        X_poly   = poly_reg.fit_transform(X)
-        result   = sm.OLS(y, X_poly).fit()
+        pr = PolynomialFeatures(degree=degree); Xp = pr.fit_transform(X)
+        res = sm.OLS(y, Xp).fit()
         RSS = TSS = 0
         for i in range(len(y)):
-            y_est = result.predict(poly_reg.fit_transform([[X[i][0]]]))[0]
-            RSS  += (y[i] - y_est) ** 2
-            TSS  += (y[i] - np.mean(y)) ** 2
-        R_sq = 1 - RSS / TSS
-        r_square.append(R_sq)
-        ratios.append((adj_r2s[idx] / R_sq) * 100)
-    best_idx    = int(np.argmin(np.abs(np.array(ratios) - 100)))
-    best_degree = valid_degrees[best_idx]
-    poly_reg    = PolynomialFeatures(degree=best_degree)
-    X_poly      = poly_reg.fit_transform(X)
-    final_model = sm.OLS(y, X_poly).fit()
+            ye = res.predict(pr.fit_transform([[X[i][0]]]))[0]
+            RSS += (y[i]-ye)**2; TSS += (y[i]-np.mean(y))**2
+        R_sq = 1-RSS/TSS; r_square.append(R_sq)
+        ratios.append((adj_r2s[idx]/R_sq)*100)
+    bi = int(np.argmin(np.abs(np.array(ratios)-100)))
+    bd = valid_degrees[bi]
+    pr = PolynomialFeatures(degree=bd); Xp = pr.fit_transform(X)
+    fm = sm.OLS(y, Xp).fit()
     RSS = TSS = 0
     for i in range(len(y)):
-        y_est = final_model.predict(poly_reg.fit_transform([[X[i][0]]]))[0]
-        RSS  += (y[i] - y_est) ** 2
-        TSS  += (y[i] - np.mean(y)) ** 2
-    final_R_sq = 1 - RSS / TSS
-    y_test   = test["Intensity"].values
-    poly_reg = PolynomialFeatures(degree=best_degree)
-    X_poly   = poly_reg.fit_transform(X)
-    result   = sm.OLS(y, X_poly).fit()
+        ye = fm.predict(pr.fit_transform([[X[i][0]]]))[0]
+        RSS += (y[i]-ye)**2; TSS += (y[i]-np.mean(y))**2
+    fR = 1-RSS/TSS
+    yt = test["Intensity"].values
+    pr = PolynomialFeatures(degree=bd); Xp = pr.fit_transform(X)
+    res = sm.OLS(y, Xp).fit()
     RSS = TSS = 0
     for i in range(len(y)):
-        y_est  = result.predict(poly_reg.fit_transform([[X[i][0]]]))[0]
-        RSS   += (y_test[i] - y_est) ** 2
-        TSS   += (y_test[i] - np.mean(y)) ** 2
-    R_sq_test  = 1 - RSS / TSS
-    similarity = (R_sq_test / final_R_sq) * 100
-    degree_table = [
-        {"degree": int(d), "Adj. R²": round(a, 6),
-         "R²": round(r, 6), "Adj.R²/R² (%)": round(rt, 4)}
-        for d, a, r, rt in zip(valid_degrees, adj_r2s, r_square, ratios)
-    ]
+        ye = res.predict(pr.fit_transform([[X[i][0]]]))[0]
+        RSS += (yt[i]-ye)**2; TSS += (yt[i]-np.mean(y))**2
+    Rt = 1-RSS/TSS
     return {
-        "table":       degree_table,
-        "best_degree": best_degree,
-        "best_ratio":  ratios[best_idx],
-        "self_acc":    final_R_sq,
-        "test_acc":    R_sq_test,
-        "similarity":  similarity,
+        "table": [{"degree": int(d), "Adj. R²": round(a,6), "R²": round(r,6),
+                   "Adj.R²/R² (%)": round(rt,4)}
+                  for d,a,r,rt in zip(valid_degrees,adj_r2s,r_square,ratios)],
+        "best_degree": bd, "best_ratio": ratios[bi],
+        "self_acc": fR, "test_acc": Rt, "similarity": (Rt/fR)*100,
     }
 
-def make_spectrum_fig(px, intensity, title, color):
+def make_fig(px, intensity, title, color):
     fig, ax = plt.subplots(figsize=(10, 3.8))
     ax.plot(px, intensity, color=color, linewidth=1.8)
     ax.set_title(title, fontsize=13, fontweight="bold", pad=8)
@@ -358,368 +309,165 @@ def make_spectrum_fig(px, intensity, title, color):
     ax.set_ylabel("Intensity (counts)", fontsize=11, labelpad=6)
     ax.tick_params(axis="both", labelsize=10)
     ax.grid(True, linestyle="--", alpha=0.5)
-    fig.tight_layout()
-    return fig
+    fig.tight_layout(); return fig
 
 def fig_to_bytes(fig):
-    """Convert a matplotlib figure to PNG bytes."""
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
-    buf.seek(0)
-    return buf.read()
+    buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    buf.seek(0); return buf.read()
 
 def _pdf_safe(text):
-    """Replace Unicode chars that Helvetica can't render with ASCII equivalents."""
-    replacements = {
-        "\u00b2": "2",        # superscript 2 → 2
-        "\u00b2": "2",
-        "\u2013": "-",        # en dash → -
-        "\u2014": "--",       # em dash → --
-        "\u2192": "->",       # → arrow
-        "\u00f7": "/",        # division sign
-        "\u2248": "~",        # approximately
-        "\u2260": "!=",       # not equal
-        "\u2264": "<=",       # less or equal
-        "\u2265": ">=",       # greater or equal
-        "\u00d7": "x",        # multiplication sign
-        "\u2019": "'",        # right single quote
-        "\u2018": "'",        # left single quote
-        "\u201c": '"',        # left double quote
-        "\u201d": '"',        # right double quote
-        "\u2026": "...",      # ellipsis
-        "\u00e9": "e",        # e acute
-        "\u00e0": "a",        # a grave
-        "\u00fc": "u",        # u umlaut
-        "\uff08": "(",        # fullwidth (
-        "\uff09": ")",        # fullwidth )
-    }
-    for uni, asc in replacements.items():
-        text = text.replace(uni, asc)
-    # Remove any remaining non-latin1 characters
+    for u,a in {"\u2013":"-","\u2014":"--","\u2192":"->","\u00f7":"/",
+                "\u00d7":"x","\u2019":"'","\u2018":"'","\u201c":'"',"\u201d":'"',
+                "\u2026":"...","\u00b2":"2"}.items():
+        text = text.replace(u,a)
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
-# ── Register Arial Unicode font for Chinese PDF support ──────────────────
-_ARIAL_UNICODE_PATH = os.path.join(BASE_DIR, "fonts", "ArialUnicode.ttf")
-_ARIAL_UNICODE_REGISTERED = False
-def _ensure_arial_unicode():
-    global _ARIAL_UNICODE_REGISTERED
-    if not _ARIAL_UNICODE_REGISTERED and os.path.exists(_ARIAL_UNICODE_PATH):
-        pdfmetrics.registerFont(TTFont("ArialUnicode", _ARIAL_UNICODE_PATH))
-        _ARIAL_UNICODE_REGISTERED = True
-    return _ARIAL_UNICODE_REGISTERED
+_ARIAL_PATH = os.path.join(BASE_DIR, "fonts", "ArialUnicode.ttf")
+_ARIAL_REG  = False
+def _ensure_arial():
+    global _ARIAL_REG
+    if not _ARIAL_REG and os.path.exists(_ARIAL_PATH):
+        pdfmetrics.registerFont(TTFont("ArialUnicode", _ARIAL_PATH)); _ARIAL_REG = True
+    return _ARIAL_REG
 
-# PDF-safe explanation strings (ASCII only, no emoji)
-PDF_EXPLANATIONS_EN = [
-    ("Polynomial Degree",
-     "The spectrum curve is fitted using a polynomial equation. A higher degree means a more complex curve. "
-     "The table shows all degrees that gave statistically significant fits (p < 0.001 for all terms)."),
-    ("Adjusted R2 (Adj. R2)",
-     "Measures how well the polynomial fits the reference spectrum, penalising unnecessary complexity. "
-     "Closer to 1.0 = better fit. This is used to select the best degree."),
-    ("R2 (R-squared)",
-     "The basic goodness-of-fit score - the proportion of variance in the spectrum explained by the polynomial. "
-     "1.0 = perfect fit, 0 = no fit at all."),
-    ("Adj. R2 / R2 (%)",
-     "The ratio of Adjusted R2 to R2, expressed as a percentage. The best degree is the one where this ratio "
-     "is closest to 100% - meaning the model is neither over-fitted nor under-fitted."),
-    ("Chosen Best Degree",
-     "The polynomial degree whose Adj. R2/R2 ratio is closest to 100%. This is the most balanced model - "
-     "complex enough to capture the spectrum shape, but not so complex that it overfits noise."),
-    ("Self Accuracy (R2)",
-     "How well the chosen polynomial model fits the reference medicine's own spectrum. "
-     "This is the baseline - ideally very close to 1.0."),
-    ("Test Accuracy (R2)",
-     "How well the same model fits your uploaded sample's spectrum. A value close to the Self Accuracy "
-     "means your sample behaves similarly to the reference."),
-    ("Similarity (%)",
-     "Test Accuracy / Self Accuracy x 100. This is the key result:\n"
-     "- ~100%: your sample is very similar to the reference medicine\n"
-     "- Much lower: the spectra differ significantly\n"
-     "- Can exceed 100% if your sample fits the model even better than the reference"),
+PDF_EXP_EN = [
+    ("Polynomial Degree","The spectrum curve is fitted using a polynomial equation. A higher degree means a more complex curve. The table shows all degrees that gave statistically significant fits (p < 0.001 for all terms)."),
+    ("Adjusted R2 (Adj. R2)","Measures how well the polynomial fits the reference spectrum, penalising unnecessary complexity. Closer to 1.0 = better fit."),
+    ("R2 (R-squared)","The basic goodness-of-fit score - the proportion of variance in the spectrum explained by the polynomial. 1.0 = perfect fit, 0 = no fit at all."),
+    ("Adj. R2 / R2 (%)","The ratio of Adjusted R2 to R2, expressed as a percentage. The best degree is the one where this ratio is closest to 100%."),
+    ("Chosen Best Degree","The polynomial degree whose Adj. R2/R2 ratio is closest to 100%. This is the most balanced model."),
+    ("Self Accuracy (R2)","How well the chosen polynomial model fits the reference medicine's own spectrum. This is the baseline - ideally very close to 1.0."),
+    ("Test Accuracy (R2)","How well the same model fits your uploaded sample's spectrum. A value close to the Self Accuracy means your sample behaves similarly to the reference."),
+    ("Similarity (%)","Test Accuracy / Self Accuracy x 100. ~100%: very similar. Much lower: spectra differ significantly."),
 ]
-
-# Chinese PDF strings
-PDF_STRINGS_ZH = {
-    "report_title":    "近紅外光譜分析報告",
-    "ref_medicine":    "參考藥品：",
-    "date":            "日期：",
-    "sample_file":     "樣本檔案：",
-    "spectrum_graphs": "光譜圖",
-    "ref_spectrum":    "參考光譜 - ",
-    "sample_spectrum": "樣本光譜 - ",
-    "analysis":        "分析結果",
-    "degree":          "階數",
-    "adj_r2":          "Adj. R2",
-    "r2":              "R2",
-    "ratio":           "Adj.R2/R2 (%)",
-    "best_degree":     "最佳階數",
-    "best_ratio":      "最佳階數比率",
-    "self_acc":        "自身準確度 (R2)",
-    "test_acc":        "測試準確度 (R2)",
-    "similarity":      "相似度",
-    "sim_label":       "相似度：",
-    "how_to_read":     "如何解讀分析結果",
-    "footer":          "由 Filix Medtech 近紅外光譜檢視器生成",
+PDF_EXP_ZH = [
+    ("多項式階數","光譜曲線以多項式方程式進行擬合。階數越高，曲線越複雜。"),
+    ("調整後 R2","衡量多項式對參考光譜的擬合程度，越接近 1.0 表示擬合越好。"),
+    ("R2（決定係數）","基本擬合優度分數——多項式能解釋光譜變異的比例。1.0 = 完美擬合。"),
+    ("Adj. R2 / R2 (%)","最佳階數是此比率最接近 100% 的那個——代表模型既不過度擬合也不欠擬合。"),
+    ("最佳階數","Adj. R2/R2 比率最接近 100% 的多項式階數。"),
+    ("自身準確度","所選多項式模型對參考藥品本身光譜的擬合程度。"),
+    ("測試準確度","相同模型對您上傳樣本光譜的擬合程度。"),
+    ("相似度（%）","測試準確度 / 自身準確度 x 100。約 100%：非常相似。"),
+]
+PDF_ZH = {
+    "report_title":"近紅外光譜分析報告","ref_medicine":"參考藥品：","date":"日期：",
+    "sample_file":"樣本檔案：","spectrum_graphs":"光譜圖","ref_spectrum":"參考光譜 - ",
+    "sample_spectrum":"樣本光譜 - ","analysis":"分析結果","degree":"階數",
+    "adj_r2":"Adj. R2","r2":"R2","ratio":"Adj.R2/R2 (%)","best_degree":"最佳階數",
+    "best_ratio":"最佳階數比率","self_acc":"自身準確度 (R2)","test_acc":"測試準確度 (R2)",
+    "similarity":"相似度","sim_label":"相似度：","how_to_read":"如何解讀分析結果",
+    "footer":"由 Filix Medtech 近紅外光譜檢視器生成",
 }
 
-PDF_EXPLANATIONS_ZH = [
-    ("多項式階數（Polynomial Degree）",
-     "光譜曲線以多項式方程式進行擬合。階數越高，曲線越複雜。"
-     "表格顯示所有統計上顯著的階數（所有項目 p < 0.001）。"),
-    ("調整後 R2（Adj. R2）",
-     "衡量多項式對參考光譜的擬合程度，並對不必要的複雜度進行懲罰。"
-     "越接近 1.0 表示擬合越好。此數值用於選擇最佳階數。"),
-    ("R2（決定係數）",
-     "基本擬合優度分數——多項式能解釋光譜變異的比例。"
-     "1.0 = 完美擬合，0 = 完全無法擬合。"),
-    ("Adj. R2 / R2 (%)",
-     "Adj. R2 與 R2 的比率，以百分比表示。"
-     "最佳階數是此比率最接近 100% 的那個——代表模型既不過度擬合也不欠擬合。"),
-    ("最佳階數",
-     "Adj. R2/R2 比率最接近 100% 的多項式階數。"
-     "這是最平衡的模型——足夠複雜以捕捉光譜形狀，但不會過度擬合雜訊。"),
-    ("自身準確度（R2）",
-     "所選多項式模型對參考藥品本身光譜的擬合程度。"
-     "這是基準值——理想情況下應非常接近 1.0。"),
-    ("測試準確度（R2）",
-     "相同模型對您上傳樣本光譜的擬合程度。"
-     "數值越接近自身準確度，表示您的樣本與參考藥品越相似。"),
-    ("相似度（%）",
-     "測試準確度 / 自身準確度 x 100。這是最關鍵的結果：\n"
-     "- 約 100%：您的樣本與參考藥品非常相似\n"
-     "- 遠低於 100%：光譜差異顯著\n"
-     "- 可能超過 100%（若您的樣本比參考藥品更符合模型）"),
-]
-
-def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_sample_bytes, res, explanations, lang="en"):
-    """Generate a nicely formatted PDF report and return as bytes."""
+def generate_pdf(med_name, sample_name, fig_ref_bytes, fig_smp_bytes, res, lang="en"):
     buf = io.BytesIO()
-
-    # Use Arial Unicode for Chinese, Helvetica for English
-    use_zh = (lang == "zh") and _ensure_arial_unicode()
-    FONT_REG  = "ArialUnicode" if use_zh else "Helvetica"
-    FONT_BOLD = "ArialUnicode" if use_zh else "Helvetica-Bold"
-    ZH = PDF_STRINGS_ZH if use_zh else {}
-
-    # Colours
-    PURPLE     = colors.HexColor("#3a3a5c")
-    LIGHT_BLUE = colors.HexColor("#eef4fb")
-    BORDER     = colors.HexColor("#b0cce8")
-    GREEN_BG   = colors.HexColor("#f0fff0")
-    GREEN_BD   = colors.HexColor("#5a7a5c")
-    GREY       = colors.HexColor("#555555")
-    WHITE      = colors.white
-
-    doc = SimpleDocTemplate(
-        buf, pagesize=A4,
-        leftMargin=2*cm, rightMargin=2*cm,
-        topMargin=2*cm, bottomMargin=2*cm,
-    )
-    W = A4[0] - 4*cm   # usable width
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("title", fontSize=20, textColor=PURPLE,
-                                  spaceAfter=4, fontName=FONT_BOLD,
-                                  alignment=TA_CENTER)
-    sub_style   = ParagraphStyle("sub",   fontSize=11, textColor=GREY,
-                                  spaceAfter=2, fontName=FONT_REG,
-                                  alignment=TA_CENTER)
-    h2_style    = ParagraphStyle("h2",    fontSize=14, textColor=PURPLE,
-                                  spaceBefore=14, spaceAfter=6,
-                                  fontName=FONT_BOLD)
-    h3_style    = ParagraphStyle("h3",    fontSize=12, textColor=PURPLE,
-                                  spaceBefore=10, spaceAfter=4,
-                                  fontName=FONT_BOLD)
-    body_style  = ParagraphStyle("body",  fontSize=10, textColor=GREY,
-                                  spaceAfter=4, fontName=FONT_REG,
-                                  leading=15)
-    bold_style  = ParagraphStyle("bold",  fontSize=10, textColor=PURPLE,
-                                  spaceAfter=2, fontName=FONT_BOLD)
-    small_style = ParagraphStyle("small", fontSize=9,  textColor=GREY,
-                                  spaceAfter=2, fontName=FONT_REG)
-
-    story = []
-
-    # ── Header ──────────────────────────────────────────────────────────
+    use_zh = (lang=="zh") and _ensure_arial()
+    FR = "ArialUnicode" if use_zh else "Helvetica"
+    FB = "ArialUnicode" if use_zh else "Helvetica-Bold"
+    ZH = PDF_ZH if use_zh else {}
+    PURPLE=colors.HexColor("#3a3a5c"); LB=colors.HexColor("#eef4fb")
+    BD=colors.HexColor("#b0cce8"); GBG=colors.HexColor("#f0fff0")
+    GBD=colors.HexColor("#5a7a5c"); GREY=colors.HexColor("#555555"); W_=colors.white
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm,
+                            topMargin=2*cm, bottomMargin=2*cm)
+    W = A4[0]-4*cm
+    ts = ParagraphStyle("t",fontSize=20,textColor=PURPLE,spaceAfter=4,fontName=FB,alignment=TA_CENTER)
+    ss = ParagraphStyle("s",fontSize=11,textColor=GREY,spaceAfter=2,fontName=FR,alignment=TA_CENTER)
+    h2 = ParagraphStyle("h2",fontSize=14,textColor=PURPLE,spaceBefore=14,spaceAfter=6,fontName=FB)
+    h3 = ParagraphStyle("h3",fontSize=12,textColor=PURPLE,spaceBefore=10,spaceAfter=4,fontName=FB)
+    bs = ParagraphStyle("b",fontSize=10,textColor=GREY,spaceAfter=4,fontName=FR,leading=15)
+    bds= ParagraphStyle("bd",fontSize=10,textColor=PURPLE,spaceAfter=2,fontName=FB)
+    sms= ParagraphStyle("sm",fontSize=9,textColor=GREY,spaceAfter=2,fontName=FR)
+    story=[]
     if os.path.exists(LOGO_PATH):
-        logo = RLImage(LOGO_PATH, width=2.5*cm, height=2.5*cm)
-        story.append(logo)
-        story.append(Spacer(1, 0.5*cm))   # more space between logo and title
-
-    report_subtitle = ZH.get("report_title", "NIR Spectrum Analysis Report") if use_zh else "NIR Spectrum Analysis Report"
-    story.append(Paragraph("Filix Medtech", title_style))
-    story.append(Spacer(1, 0.3*cm))
-    story.append(Paragraph(report_subtitle, sub_style))
-    story.append(Spacer(1, 0.4*cm))
-    story.append(HRFlowable(width="100%", thickness=2, color=PURPLE))
-    story.append(Spacer(1, 0.4*cm))
-
-    # Date & info
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        story.append(RLImage(LOGO_PATH,width=2.5*cm,height=2.5*cm))
+        story.append(Spacer(1,0.5*cm))
+    story.append(Paragraph("Filix Medtech",ts))
+    story.append(Spacer(1,0.3*cm))
+    story.append(Paragraph(ZH.get("report_title","NIR Spectrum Analysis Report") if use_zh else "NIR Spectrum Analysis Report",ss))
+    story.append(Spacer(1,0.4*cm))
+    story.append(HRFlowable(width="100%",thickness=2,color=PURPLE))
+    story.append(Spacer(1,0.4*cm))
+    now=datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     if use_zh:
-        info_data = [
-            [ZH["ref_medicine"], med_name,  ZH["date"], now],
-            [ZH["sample_file"],  sample_name, "", ""],
-        ]
+        id_=[[ ZH["ref_medicine"],med_name,ZH["date"],now],[ZH["sample_file"],sample_name,"",""]]
     else:
-        info_data = [
-            ["Reference Medicine:", med_name,  "Date:", now],
-            ["Sample File:",        sample_name, "", ""],
-        ]
-    info_table = Table(info_data, colWidths=[3.5*cm, 6*cm, 2*cm, 5*cm])
-    info_table.setStyle(TableStyle([
-        ("FONTNAME",  (0,0), (-1,-1), FONT_REG),
-        ("FONTNAME",  (0,0), (0,-1),  FONT_BOLD),
-        ("FONTNAME",  (2,0), (2,-1),  FONT_BOLD),
-        ("FONTSIZE",  (0,0), (-1,-1), 10),
-        ("TEXTCOLOR", (0,0), (-1,-1), GREY),
-        ("TEXTCOLOR", (0,0), (0,-1),  PURPLE),
-        ("TEXTCOLOR", (2,0), (2,-1),  PURPLE),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 4),
-    ]))
-    story.append(info_table)
-    story.append(Spacer(1, 0.4*cm))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
-
-    # ── Spectra ──────────────────────────────────────────────────────────
-    spectra_title = ZH.get("spectrum_graphs", "Spectrum Graphs") if use_zh else "Spectrum Graphs"
-    story.append(Paragraph(spectra_title, h2_style))
-
-    ref_label = (ZH["ref_spectrum"] + med_name) if use_zh else _pdf_safe(f"Reference Spectrum - {med_name}")
-    story.append(Paragraph(ref_label, h3_style))
-    ref_img = RLImage(io.BytesIO(fig_ref_bytes), width=W, height=W*0.38)
-    story.append(ref_img)
-    story.append(Spacer(1, 0.3*cm))
-
-    smp_label = (ZH["sample_spectrum"] + sample_name) if use_zh else _pdf_safe(f"Sample Spectrum - {sample_name}")
-    story.append(Paragraph(smp_label, h3_style))
-    smp_img = RLImage(io.BytesIO(fig_sample_bytes), width=W, height=W*0.38)
-    story.append(smp_img)
-    story.append(Spacer(1, 0.4*cm))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
-
-    # ── Analysis Results (new page) ──────────────────────────────────────
+        id_=[["Reference Medicine:",med_name,"Date:",now],["Sample File:",sample_name,"",""]]
+    it=Table(id_,colWidths=[3.5*cm,6*cm,2*cm,5*cm])
+    it.setStyle(TableStyle([("FONTNAME",(0,0),(-1,-1),FR),("FONTNAME",(0,0),(0,-1),FB),
+        ("FONTNAME",(2,0),(2,-1),FB),("FONTSIZE",(0,0),(-1,-1),10),
+        ("TEXTCOLOR",(0,0),(-1,-1),GREY),("TEXTCOLOR",(0,0),(0,-1),PURPLE),
+        ("TEXTCOLOR",(2,0),(2,-1),PURPLE),("BOTTOMPADDING",(0,0),(-1,-1),4)]))
+    story.append(it); story.append(Spacer(1,0.4*cm))
+    story.append(HRFlowable(width="100%",thickness=0.5,color=BD))
+    story.append(Paragraph(ZH.get("spectrum_graphs","Spectrum Graphs") if use_zh else "Spectrum Graphs",h2))
+    rl=(ZH["ref_spectrum"]+med_name) if use_zh else _pdf_safe(f"Reference Spectrum - {med_name}")
+    story.append(Paragraph(rl,h3))
+    story.append(RLImage(io.BytesIO(fig_ref_bytes),width=W,height=W*0.38))
+    story.append(Spacer(1,0.3*cm))
+    sl=(ZH["sample_spectrum"]+sample_name) if use_zh else _pdf_safe(f"Sample Spectrum - {sample_name}")
+    story.append(Paragraph(sl,h3))
+    story.append(RLImage(io.BytesIO(fig_smp_bytes),width=W,height=W*0.38))
+    story.append(Spacer(1,0.4*cm))
+    story.append(HRFlowable(width="100%",thickness=0.5,color=BD))
     story.append(PageBreak())
-    analysis_title = ZH.get("analysis", "Analysis Results") if use_zh else "Analysis Results"
-    story.append(Paragraph(analysis_title, h2_style))
-
-    # Degree table
+    story.append(Paragraph(ZH.get("analysis","Analysis Results") if use_zh else "Analysis Results",h2))
+    hdr=[ZH["degree"],ZH["adj_r2"],ZH["r2"],ZH["ratio"]] if use_zh else ["Degree","Adj. R2","R2","Adj.R2/R2 (%)"]
+    td=[hdr]+[[str(r["degree"]),f"{r['Adj. R\u00b2']:.6f}",f"{r['R\u00b2']:.6f}",f"{r['Adj.R\u00b2/R\u00b2 (%)']:.4f}"] for r in res["table"]]
+    cw=W/4
+    dt=Table(td,colWidths=[cw]*4)
+    dt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),PURPLE),("TEXTCOLOR",(0,0),(-1,0),W_),
+        ("FONTNAME",(0,0),(-1,0),FB),("FONTNAME",(0,1),(-1,-1),FR),("FONTSIZE",(0,0),(-1,-1),10),
+        ("ALIGN",(0,0),(-1,-1),"CENTER"),("ROWBACKGROUNDS",(0,1),(-1,-1),[W_,LB]),
+        ("GRID",(0,0),(-1,-1),0.5,BD),("BOTTOMPADDING",(0,0),(-1,-1),6),("TOPPADDING",(0,0),(-1,-1),6)]))
+    story.append(dt); story.append(Spacer(1,0.4*cm))
+    sim=res["similarity"]
     if use_zh:
-        hdr = [ZH["degree"], ZH["adj_r2"], ZH["r2"], ZH["ratio"]]
+        mx=[[ZH["best_degree"],str(res["best_degree"])],[ZH["best_ratio"],f"{res['best_ratio']:.4f} %"],
+            [ZH["self_acc"],f"{res['self_acc']:.6f}"],[ZH["test_acc"],f"{res['test_acc']:.6f}"],
+            [ZH["similarity"],f"{sim:.4f} %"]]
     else:
-        hdr = ["Degree", "Adj. R2", "R2", "Adj.R2/R2 (%)"]
-    tbl_data = [hdr]
-    for row in res["table"]:
-        tbl_data.append([
-            str(row["degree"]),
-            f"{row['Adj. R\u00b2']:.6f}",
-            f"{row['R\u00b2']:.6f}",
-            f"{row['Adj.R\u00b2/R\u00b2 (%)']:.4f}",
-        ])
-    col_w = W / 4
-    deg_table = Table(tbl_data, colWidths=[col_w]*4)
-    deg_table.setStyle(TableStyle([
-        ("BACKGROUND",   (0,0), (-1,0),  PURPLE),
-        ("TEXTCOLOR",    (0,0), (-1,0),  WHITE),
-        ("FONTNAME",     (0,0), (-1,0),  FONT_BOLD),
-        ("FONTNAME",     (0,1), (-1,-1), FONT_REG),
-        ("FONTSIZE",     (0,0), (-1,-1), 10),
-        ("ALIGN",        (0,0), (-1,-1), "CENTER"),
-        ("ROWBACKGROUNDS",(0,1),(-1,-1), [WHITE, LIGHT_BLUE]),
-        ("GRID",         (0,0), (-1,-1), 0.5, BORDER),
-        ("BOTTOMPADDING",(0,0), (-1,-1), 6),
-        ("TOPPADDING",   (0,0), (-1,-1), 6),
-    ]))
-    story.append(deg_table)
-    story.append(Spacer(1, 0.4*cm))
-
-    # Key metrics
-    sim = res["similarity"]
-    if use_zh:
-        metrics = [
-            [ZH["best_degree"],  str(res["best_degree"])],
-            [ZH["best_ratio"],   f"{res['best_ratio']:.4f} %"],
-            [ZH["self_acc"],     f"{res['self_acc']:.6f}"],
-            [ZH["test_acc"],     f"{res['test_acc']:.6f}"],
-            [ZH["similarity"],   f"{sim:.4f} %"],
-        ]
-    else:
-        metrics = [
-            ["Chosen Best Degree",  str(res["best_degree"])],
-            ["Best Degree Ratio",   f"{res['best_ratio']:.4f} %"],
-            ["Self Accuracy (R2)",  f"{res['self_acc']:.6f}"],
-            ["Test Accuracy (R2)",  f"{res['test_acc']:.6f}"],
-            ["Similarity",          f"{sim:.4f} %"],
-        ]
-    met_table = Table(metrics, colWidths=[W*0.5, W*0.5])
-    met_table.setStyle(TableStyle([
-        ("FONTNAME",     (0,0), (0,-1),  FONT_BOLD),
-        ("FONTNAME",     (1,0), (1,-1),  FONT_REG),
-        ("FONTSIZE",     (0,0), (-1,-1), 10),
-        ("TEXTCOLOR",    (0,0), (0,-1),  PURPLE),
-        ("TEXTCOLOR",    (1,0), (1,-1),  GREY),
-        ("ROWBACKGROUNDS",(0,0),(-1,-1), [WHITE, LIGHT_BLUE]),
-        ("GRID",         (0,0), (-1,-1), 0.5, BORDER),
-        ("BOTTOMPADDING",(0,0), (-1,-1), 6),
-        ("TOPPADDING",   (0,0), (-1,-1), 6),
-        ("ALIGN",        (1,0), (1,-1),  "RIGHT"),
-    ]))
-    story.append(met_table)
-    story.append(Spacer(1, 0.3*cm))
-
-    # Similarity highlight box
-    sim_label = f"{ZH['sim_label']}{sim:.2f}%" if use_zh else f"Similarity: {sim:.2f}%"
-    sim_data = [[sim_label]]
-    sim_table = Table(sim_data, colWidths=[W])
-    sim_table.setStyle(TableStyle([
-        ("BACKGROUND",   (0,0), (-1,-1), GREEN_BG),
-        ("TEXTCOLOR",    (0,0), (-1,-1), GREEN_BD),
-        ("FONTNAME",     (0,0), (-1,-1), FONT_BOLD),
-        ("FONTSIZE",     (0,0), (-1,-1), 16),
-        ("ALIGN",        (0,0), (-1,-1), "CENTER"),
-        ("BOX",          (0,0), (-1,-1), 1.5, GREEN_BD),
-        ("BOTTOMPADDING",(0,0), (-1,-1), 12),
-        ("TOPPADDING",   (0,0), (-1,-1), 12),
-    ]))
-    story.append(sim_table)
-    story.append(Spacer(1, 0.4*cm))
-    story.append(HRFlowable(width="100%", thickness=0.5, color=BORDER))
-
-    # ── How to Read ───────────────────────────────────────────────────────
+        mx=[["Chosen Best Degree",str(res["best_degree"])],["Best Degree Ratio",f"{res['best_ratio']:.4f} %"],
+            ["Self Accuracy (R2)",f"{res['self_acc']:.6f}"],["Test Accuracy (R2)",f"{res['test_acc']:.6f}"],
+            ["Similarity",f"{sim:.4f} %"]]
+    mt=Table(mx,colWidths=[W*0.5,W*0.5])
+    mt.setStyle(TableStyle([("FONTNAME",(0,0),(0,-1),FB),("FONTNAME",(1,0),(1,-1),FR),
+        ("FONTSIZE",(0,0),(-1,-1),10),("TEXTCOLOR",(0,0),(0,-1),PURPLE),("TEXTCOLOR",(1,0),(1,-1),GREY),
+        ("ROWBACKGROUNDS",(0,0),(-1,-1),[W_,LB]),("GRID",(0,0),(-1,-1),0.5,BD),
+        ("BOTTOMPADDING",(0,0),(-1,-1),6),("TOPPADDING",(0,0),(-1,-1),6),("ALIGN",(1,0),(1,-1),"RIGHT")]))
+    story.append(mt); story.append(Spacer(1,0.3*cm))
+    sl2=f"{ZH['sim_label']}{sim:.2f}%" if use_zh else f"Similarity: {sim:.2f}%"
+    st2=Table([[sl2]],colWidths=[W])
+    st2.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,-1),GBG),("TEXTCOLOR",(0,0),(-1,-1),GBD),
+        ("FONTNAME",(0,0),(-1,-1),FB),("FONTSIZE",(0,0),(-1,-1),16),("ALIGN",(0,0),(-1,-1),"CENTER"),
+        ("BOX",(0,0),(-1,-1),1.5,GBD),("BOTTOMPADDING",(0,0),(-1,-1),12),("TOPPADDING",(0,0),(-1,-1),12)]))
+    story.append(st2); story.append(Spacer(1,0.4*cm))
+    story.append(HRFlowable(width="100%",thickness=0.5,color=BD))
     story.append(PageBreak())
-    how_title  = ZH.get("how_to_read", "How to Read These Results") if use_zh else "How to Read These Results"
-    footer_txt = ZH.get("footer", "Generated by Filix Medtech NIR Spectrum Viewer") if use_zh else "Generated by Filix Medtech NIR Spectrum Viewer"
-    story.append(Paragraph(how_title, h2_style))
-    story.append(Spacer(1, 0.2*cm))
+    story.append(Paragraph(ZH.get("how_to_read","How to Read These Results") if use_zh else "How to Read These Results",h2))
+    story.append(Spacer(1,0.2*cm))
+    for et,ed in (PDF_EXP_ZH if use_zh else PDF_EXP_EN):
+        story.append(Paragraph(et if use_zh else _pdf_safe(et),bds))
+        for line in ed.split("\n"):
+            line=line.strip()
+            if line: story.append(Paragraph(line if use_zh else _pdf_safe(line),bs))
+        story.append(Spacer(1,0.2*cm))
+    story.append(Spacer(1,0.4*cm))
+    story.append(HRFlowable(width="100%",thickness=1,color=PURPLE))
+    story.append(Spacer(1,0.2*cm))
+    story.append(Paragraph(ZH.get("footer","Generated by Filix Medtech NIR Spectrum Viewer") if use_zh else "Generated by Filix Medtech NIR Spectrum Viewer",sms))
+    doc.build(story); buf.seek(0); return buf.read()
 
-    exp_list = PDF_EXPLANATIONS_ZH if use_zh else PDF_EXPLANATIONS_EN
-    for exp_title, exp_desc in exp_list:
-        t = exp_title if use_zh else _pdf_safe(exp_title)
-        story.append(Paragraph(t, bold_style))
-        for line in exp_desc.split("\n"):
-            line = line.strip()
-            if line:
-                line = line if use_zh else _pdf_safe(line)
-                story.append(Paragraph(line, body_style))
-        story.append(Spacer(1, 0.2*cm))
-
-    story.append(Spacer(1, 0.4*cm))
-    story.append(HRFlowable(width="100%", thickness=1, color=PURPLE))
-    story.append(Spacer(1, 0.2*cm))
-    story.append(Paragraph(footer_txt, small_style))
-
-    doc.build(story)
-    buf.seek(0)
-    return buf.read()
+def safe_filename(name):
+    name=name.strip().lower()
+    name=re.sub(r"[^\w\s-]","",name)
+    return re.sub(r"[\s]+","_",name)
 
 # ─────────────────────────────────────────────
 #  Page config & CSS
 # ─────────────────────────────────────────────
-st.set_page_config(
-    page_title="Filix Medtech – NIR Spectrum Viewer",
-    page_icon="🔬",
-    layout="wide",
-)
+st.set_page_config(page_title="Filix Medtech", page_icon="🔬", layout="wide")
 
 st.markdown("""
 <style>
@@ -727,218 +475,375 @@ st.markdown("""
     h1 { font-size: 2rem !important; }
     h2 { font-size: 1.7rem !important; }
     h3 { font-size: 1.4rem !important; }
-    p, label, .stMarkdown, .stCaption,
-    .stText, div[data-testid="stMarkdownContainer"] p {
-        font-size: 1.05rem !important;
-        line-height: 1.6 !important;
-    }
-    .stButton > button {
-        font-size: 1.2rem !important;
-        padding: 0.6rem 1.4rem !important;
-    }
+    p, label, .stMarkdown, div[data-testid="stMarkdownContainer"] p {
+        font-size: 1.05rem !important; line-height: 1.6 !important; }
+    .stButton > button { font-size: 1.1rem !important; padding: 0.55rem 1.3rem !important; }
     [data-testid="stMetricLabel"] { font-size: 1rem !important; }
     [data-testid="stMetricValue"] { font-size: 1.4rem !important; }
-    .stDataFrame { font-size: 1rem !important; }
-    .med-card {
-        background: white; border: 1px solid #ddd;
-        border-radius: 10px; padding: 20px 24px; margin-bottom: 16px;
-        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-    }
-    .med-card h3 { margin: 0 0 6px 0; color: #3a3a5c; font-size: 1.3rem; }
-    .med-card p  { margin: 0 0 12px 0; color: #555; font-size: 1.05rem; }
-    .info-note {
-        background: #eef4fb; border: 1px solid #b0cce8;
-        border-radius: 6px; padding: 10px 16px;
-        color: #2a5080; font-size: 1rem; margin-bottom: 12px;
-    }
-    .similarity-box {
-        background: #f0fff0; border: 2px solid #5a7a5c;
-        border-radius: 8px; padding: 16px 24px;
-        text-align: center; font-size: 1.6rem;
-        font-weight: bold; color: #3a3a5c; margin: 12px 0;
-    }
+    .med-card { background:white; border:1px solid #ddd; border-radius:10px;
+        padding:20px 24px; margin-bottom:16px; box-shadow:0 1px 4px rgba(0,0,0,0.06); }
+    .med-card h3 { margin:0 0 6px 0; color:#3a3a5c; font-size:1.3rem; }
+    .med-card p  { margin:0 0 12px 0; color:#555; font-size:1.05rem; }
+    .info-note { background:#eef4fb; border:1px solid #b0cce8; border-radius:6px;
+        padding:10px 16px; color:#2a5080; font-size:1rem; margin-bottom:12px; }
+    .similarity-box { background:#f0fff0; border:2px solid #5a7a5c; border-radius:8px;
+        padding:16px 24px; text-align:center; font-size:1.6rem;
+        font-weight:bold; color:#3a3a5c; margin:12px 0; }
+    .home-card { background:white; border:2px solid #ddd; border-radius:14px;
+        padding:36px 28px; text-align:center; cursor:pointer;
+        box-shadow:0 2px 8px rgba(0,0,0,0.07); transition:box-shadow 0.2s; }
+    .home-card:hover { box-shadow:0 4px 16px rgba(0,0,0,0.13); }
+    .home-card h2 { color:#3a3a5c; margin:12px 0 8px 0; font-size:1.5rem; }
+    .home-card p  { color:#666; font-size:1rem; margin:0; }
+    .med-row { background:#fff; border:1px solid #ddd; border-radius:8px;
+        padding:14px 20px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.05); }
+    .med-row h4 { margin:0 0 4px 0; color:#3a3a5c; font-size:1.1rem; }
+    .med-row p  { margin:0; color:#666; font-size:0.95rem; }
+    .success-box { background:#f0fff0; border:1px solid #5a7a5c; border-radius:6px;
+        padding:10px 16px; color:#2d5a2d; margin:8px 0; }
+    .danger-box  { background:#fff0f0; border:1px solid #c0392b; border-radius:6px;
+        padding:10px 16px; color:#7a1010; margin:8px 0; }
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 #  Session state
 # ─────────────────────────────────────────────
-if "lang"         not in st.session_state: st.session_state.lang         = "en"
-if "page"         not in st.session_state: st.session_state.page         = "list"
-if "selected_med" not in st.session_state: st.session_state.selected_med = None
-if "upload_bytes" not in st.session_state: st.session_state.upload_bytes = None
-if "analysis_res" not in st.session_state: st.session_state.analysis_res = None
+for k,v in [("mode","home"),("lang","en"),("page","list"),
+             ("selected_med",None),("upload_bytes",None),("analysis_res",None),
+             ("confirm_delete",None),("add_success",False),("delete_success",None)]:
+    if k not in st.session_state: st.session_state[k] = v
 
+# ─────────────────────────────────────────────
+#  Shared header
+# ─────────────────────────────────────────────
 S = STRINGS[st.session_state.lang]
 
-# ─────────────────────────────────────────────
-#  Header
-# ─────────────────────────────────────────────
 col_logo, col_title, col_lang = st.columns([0.08, 0.82, 0.10])
 with col_logo:
-    if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, width=56)
+    if os.path.exists(LOGO_PATH): st.image(LOGO_PATH, width=52)
 with col_title:
-    st.markdown(
-        f"<div style='padding-top:8px'><h2 style='color:#3a3a5c;margin:0'>"
-        f"{S['app_title']}</h2></div>",
-        unsafe_allow_html=True)
+    mode_label = {"home":"Home","user":"User App","admin":"Admin Panel"}.get(st.session_state.mode,"")
+    st.markdown(f"<div style='padding-top:6px'><h2 style='color:#3a3a5c;margin:0'>Filix Medtech"
+                f"<span style='font-size:1rem;color:#aaa;margin-left:12px'>· {mode_label}</span></h2></div>",
+                unsafe_allow_html=True)
 with col_lang:
-    if st.button(S["language_btn"], key="lang_btn"):
-        st.session_state.lang = "zh" if st.session_state.lang == "en" else "en"
+    if st.session_state.mode == "user":
+        if st.button(S["language_btn"], key="lang_btn"):
+            st.session_state.lang = "zh" if st.session_state.lang=="en" else "en"
+            st.rerun()
+
+st.markdown("<hr style='margin:4px 0 16px 0'>", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════
+#  HOME PAGE
+# ═══════════════════════════════════════════════════════════════
+if st.session_state.mode == "home":
+    st.markdown("<div style='text-align:center;padding:10px 0 24px 0'>"
+                "<h2 style='color:#3a3a5c'>Welcome to Filix Medtech</h2>"
+                "<p style='color:#666;font-size:1.1rem'>Please select how you would like to use this app.</p>"
+                "</div>", unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2, gap="large")
+    with col1:
+        st.markdown("""<div class="home-card">
+            <div style="font-size:3rem">🔬</div>
+            <h2>User App</h2>
+            <p>View reference NIR spectra and compare your sample CSV to check similarity.</p>
+        </div>""", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        if st.button("Enter User App →", key="go_user", use_container_width=True, type="primary"):
+            st.session_state.mode = "user"
+            st.session_state.page = "list"
+            st.rerun()
+
+    with col2:
+        st.markdown("""<div class="home-card">
+            <div style="font-size:3rem">🛠️</div>
+            <h2>Admin Panel</h2>
+            <p>Manage the list of reference medicines — add new ones or remove existing ones.</p>
+        </div>""", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        if st.button("Enter Admin Panel →", key="go_admin", use_container_width=True):
+            st.session_state.mode = "admin"
+            st.rerun()
+
+# ═══════════════════════════════════════════════════════════════
+#  USER APP
+# ═══════════════════════════════════════════════════════════════
+elif st.session_state.mode == "user":
+    MEDICINES = load_medicines()
+    S = STRINGS[st.session_state.lang]
+
+    # Back to home
+    if st.button("⬅ Back to Home", key="user_home_btn"):
+        st.session_state.mode = "home"
+        st.session_state.page = "list"
+        st.session_state.upload_bytes = None
+        st.session_state.analysis_res = None
         st.rerun()
 
-st.markdown("<hr style='margin:0 0 16px 0'>", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-#  LIST PAGE (default landing page)
-# ─────────────────────────────────────────────
-if st.session_state.page == "list":
-    st.markdown(f"## {S['list_title']}")
-    st.markdown(f"<p style='color:#555;margin-top:-8px'>{S['list_subtitle']}</p>",
-                unsafe_allow_html=True)
-    st.markdown("---")
-    for name, info in MEDICINES.items():
-        desc = info["description_zh"] if st.session_state.lang == "zh" else info["description"]
-        st.markdown(f'<div class="med-card"><h3>{name}</h3><p>{desc}</p></div>',
+    # ── LIST PAGE ──────────────────────────────────────────────
+    if st.session_state.page == "list":
+        st.markdown(f"## {S['list_title']}")
+        st.markdown(f"<p style='color:#555;margin-top:-8px'>{S['list_subtitle']}</p>",
                     unsafe_allow_html=True)
-        if st.button(S["view_spectrum"], key=f"view_{name}"):
-            st.session_state.page         = "detail"
-            st.session_state.selected_med = name
-            st.session_state.upload_bytes = None
-            st.session_state.analysis_res = None
-            st.rerun()
+        st.markdown("---")
+        for name, info in MEDICINES.items():
+            desc = info["description_zh"] if st.session_state.lang=="zh" else info["description"]
+            st.markdown(f'<div class="med-card"><h3>{name}</h3><p>{desc}</p></div>',
+                        unsafe_allow_html=True)
+            if st.button(S["view_spectrum"], key=f"view_{name}"):
+                st.session_state.page = "detail"
+                st.session_state.selected_med = name
+                st.session_state.upload_bytes = None
+                st.session_state.analysis_res = None
+                st.rerun()
 
-# ─────────────────────────────────────────────
-#  DETAIL PAGE
-# ─────────────────────────────────────────────
-elif st.session_state.page == "detail":
-    name = st.session_state.selected_med
-    col_back, col_title_d = st.columns([0.18, 0.82])
-    with col_back:
-        if st.button(S["back_list"], key="back_list_btn"):
-            st.session_state.page         = "list"
-            st.session_state.upload_bytes = None
-            st.session_state.analysis_res = None
-            st.rerun()
-    with col_title_d:
-        st.markdown(f"## {name}")
+    # ── DETAIL PAGE ────────────────────────────────────────────
+    elif st.session_state.page == "detail":
+        name = st.session_state.selected_med
+        col_back, col_ttl = st.columns([0.18, 0.82])
+        with col_back:
+            if st.button(S["back_list"], key="back_list_btn"):
+                st.session_state.page = "list"
+                st.session_state.upload_bytes = None
+                st.session_state.analysis_res = None
+                st.rerun()
+        with col_ttl:
+            st.markdown(f"## {name}")
 
-    desc_key = "description_zh" if st.session_state.lang == "zh" else "description"
-    st.markdown(
-        f"<p style='font-size:1.1rem;color:#555;margin-top:-8px'>"
-        f"{MEDICINES[name][desc_key]}</p>",
-        unsafe_allow_html=True)
-    st.markdown("---")
+        dk = "description_zh" if st.session_state.lang=="zh" else "description"
+        st.markdown(f"<p style='font-size:1.1rem;color:#555;margin-top:-8px'>{MEDICINES[name][dk]}</p>",
+                    unsafe_allow_html=True)
+        st.markdown("---")
 
-    # Reference spectrum
-    st.markdown(f"### {S['ref_spectrum']}")
-    try:
-        ref_csv_bytes = _get_csv_bytes(MEDICINES[name])
-        px, intensity = load_spectrum(ref_csv_bytes, from_bytes=True)
-        fig_ref = make_spectrum_fig(px, intensity, f"{name} — Pixel vs. Intensity", "purple")
-        st.pyplot(fig_ref); plt.close(fig_ref)
-    except Exception as e:
-        st.error(f"Could not load reference spectrum: {e}")
-
-    st.markdown("---")
-    st.markdown(f"### {S['upload_section']}")
-    st.markdown(f'<div class="info-note">{S["upload_note"]}</div>', unsafe_allow_html=True)
-
-    uploaded = st.file_uploader(S["upload_btn"], type=["csv"], key="uploader")
-
-    if uploaded is not None:
-        file_bytes = uploaded.read()
-        if file_bytes != st.session_state.upload_bytes:
-            st.session_state.upload_bytes = file_bytes
-            st.session_state.analysis_res = None
-
-    if st.session_state.upload_bytes is not None:
-        if st.button(S["clear_btn"], key="clear_btn"):
-            st.session_state.upload_bytes = None
-            st.session_state.analysis_res = None
-            st.rerun()
-
-        # Show uploaded spectrum
+        st.markdown(f"### {S['ref_spectrum']}")
         try:
-            u_px, u_int = load_spectrum(st.session_state.upload_bytes, from_bytes=True)
-            fig_user = make_spectrum_fig(u_px, u_int,
-                                         f"{uploaded.name if uploaded else 'Sample'} — Pixel vs. Intensity",
-                                         "darkorange")
-            st.pyplot(fig_user); plt.close(fig_user)
+            rb = _get_csv_bytes(MEDICINES[name])
+            px, iv = load_spectrum(rb)
+            fig = make_fig(px, iv, f"{name} — Pixel vs. Intensity", "purple")
+            st.pyplot(fig); plt.close(fig)
         except Exception as e:
-            st.error(f"Could not load sample spectrum: {e}")
+            st.error(f"Could not load reference spectrum: {e}")
 
-        # Run analysis
-        if st.session_state.analysis_res is None:
-            with st.spinner(S["running"]):
-                try:
-                    std_bytes = _get_csv_bytes(MEDICINES[name])
-                    res = run_analysis(std_bytes, st.session_state.upload_bytes)
-                    st.session_state.analysis_res = res
-                except Exception as e:
-                    st.error(f"Analysis failed: {e}")
+        st.markdown("---")
+        st.markdown(f"### {S['upload_section']}")
+        st.markdown(f'<div class="info-note">{S["upload_note"]}</div>', unsafe_allow_html=True)
+        uploaded = st.file_uploader(S["upload_btn"], type=["csv"], key="uploader")
+        if uploaded is not None:
+            fb = uploaded.read()
+            if fb != st.session_state.upload_bytes:
+                st.session_state.upload_bytes = fb
+                st.session_state.analysis_res = None
 
-        if st.session_state.analysis_res:
-            res = st.session_state.analysis_res
-            st.markdown("---")
-            st.markdown(f"### {S['analysis_title']}")
-            df_table = pd.DataFrame(res["table"])
-            df_table.rename(columns={
-                "degree": S["degree"], "Adj. R²": S["adj_r2"],
-                "R²": S["r2"], "Adj.R²/R² (%)": S["ratio"],
-            }, inplace=True)
-            st.dataframe(df_table, use_container_width=True, hide_index=True)
-            col1, col2, col3 = st.columns(3)
-            col1.metric(S["chosen_degree"], res["best_degree"])
-            col2.metric(S["self_acc"],  f"{res['self_acc']:.6f}")
-            col3.metric(S["test_acc"],  f"{res['test_acc']:.6f}")
-            col4, col5 = st.columns(2)
-            col4.metric(S["best_ratio"], f"{res['best_ratio']:.4f} %")
-            sim = res["similarity"]
-            col5.metric(S["similarity_result"], f"{sim:.4f} %")
-            st.markdown(
-                f'<div class="similarity-box">{S["similarity_result"]}: {sim:.2f}%</div>',
+        if st.session_state.upload_bytes is not None:
+            if st.button(S["clear_btn"], key="clear_btn"):
+                st.session_state.upload_bytes = None
+                st.session_state.analysis_res = None
+                st.rerun()
+            try:
+                upx, uiv = load_spectrum(st.session_state.upload_bytes)
+                ufig = make_fig(upx, uiv,
+                                f"{uploaded.name if uploaded else 'Sample'} — Pixel vs. Intensity",
+                                "darkorange")
+                st.pyplot(ufig); plt.close(ufig)
+            except Exception as e:
+                st.error(f"Could not load sample spectrum: {e}")
+
+            if st.session_state.analysis_res is None:
+                with st.spinner(S["running"]):
+                    try:
+                        sb = _get_csv_bytes(MEDICINES[name])
+                        st.session_state.analysis_res = run_analysis(sb, st.session_state.upload_bytes)
+                    except Exception as e:
+                        st.error(f"Analysis failed: {e}")
+
+            if st.session_state.analysis_res:
+                res = st.session_state.analysis_res
+                st.markdown("---")
+                st.markdown(f"### {S['analysis_title']}")
+                df_t = pd.DataFrame(res["table"])
+                df_t.rename(columns={"degree":S["degree"],"Adj. R²":S["adj_r2"],
+                                     "R²":S["r2"],"Adj.R²/R² (%)":S["ratio"]}, inplace=True)
+                st.dataframe(df_t, use_container_width=True, hide_index=True)
+                c1,c2,c3 = st.columns(3)
+                c1.metric(S["chosen_degree"], res["best_degree"])
+                c2.metric(S["self_acc"], f"{res['self_acc']:.6f}")
+                c3.metric(S["test_acc"], f"{res['test_acc']:.6f}")
+                c4,c5 = st.columns(2)
+                c4.metric(S["best_ratio"], f"{res['best_ratio']:.4f} %")
+                sim = res["similarity"]
+                c5.metric(S["similarity_result"], f"{sim:.4f} %")
+                st.markdown(f'<div class="similarity-box">{S["similarity_result"]}: {sim:.2f}%</div>',
+                            unsafe_allow_html=True)
+                with st.expander(S["how_to_read"]):
+                    for t,d in S["explanations"]:
+                        st.markdown(f"**{t}**"); st.markdown(d); st.markdown("---")
+
+                st.markdown("---")
+                with st.spinner("📄 Preparing PDF report…"):
+                    try:
+                        rb2 = _get_csv_bytes(MEDICINES[name])
+                        px2,iv2 = load_spectrum(rb2)
+                        fr2 = make_fig(px2,iv2,f"{name} — Pixel vs. Intensity","purple")
+                        ref_b = fig_to_bytes(fr2); plt.close(fr2)
+                        upx2,uiv2 = load_spectrum(st.session_state.upload_bytes)
+                        sl = uploaded.name if uploaded else "Sample"
+                        fu2 = make_fig(upx2,uiv2,f"{sl} — Pixel vs. Intensity","darkorange")
+                        smp_b = fig_to_bytes(fu2); plt.close(fu2)
+                        pdf_b = generate_pdf(name, sl, ref_b, smp_b, res, st.session_state.lang)
+                        fname = f"filix_report_{name.replace(' ','_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                        st.download_button("📥 Download PDF Report", pdf_b, fname, "application/pdf", key="pdf_dl")
+                    except Exception as e:
+                        st.error(f"Could not generate PDF: {e}")
+
+# ═══════════════════════════════════════════════════════════════
+#  ADMIN PANEL
+# ═══════════════════════════════════════════════════════════════
+elif st.session_state.mode == "admin":
+    # Back to home
+    if st.button("⬅ Back to Home", key="admin_home_btn"):
+        st.session_state.mode = "home"
+        st.session_state.confirm_delete = None
+        st.rerun()
+
+    st.markdown("## 🛠️ Admin Panel")
+    st.markdown("<p style='color:#666;margin-top:-8px'>Manage reference medicines for user comparison.</p>",
                 unsafe_allow_html=True)
-            with st.expander(S["how_to_read"]):
-                for title, desc in S["explanations"]:
-                    st.markdown(f"**{title}**")
-                    st.markdown(desc)
-                    st.markdown("---")
 
-            # ── PDF Download ──────────────────────────────────────────
-            st.markdown("---")
-            with st.spinner("📄 Preparing PDF report…"):
+    # Success banners
+    if st.session_state.add_success:
+        st.markdown('<div class="success-box">✅ Medicine added successfully! The user app will update shortly.</div>',
+                    unsafe_allow_html=True)
+        st.session_state.add_success = False
+    if st.session_state.delete_success:
+        st.markdown(f'<div class="success-box">🗑️ <b>{st.session_state.delete_success}</b> has been removed.</div>',
+                    unsafe_allow_html=True)
+        st.session_state.delete_success = None
+
+    # Load medicines
+    try:
+        medicines, json_sha = gh_read_json_full()
+    except Exception as e:
+        st.error(f"❌ Could not load medicines from GitHub: {e}")
+        st.stop()
+
+    # ── Current medicines ──────────────────────────────────────
+    st.markdown("### 📋 Current Medicines")
+    if not medicines:
+        st.info("ℹ️ No medicines registered yet. Add one below.")
+    else:
+        for idx, med in enumerate(medicines):
+            st.markdown(
+                f'<div class="med-row"><h4>💊 {med["name"]}</h4>'
+                f'<p><b>EN:</b> {med.get("description","—")}</p>'
+                f'<p><b>ZH:</b> {med.get("description_zh","—")}</p>'
+                f'<p style="font-size:0.85rem;color:#aaa;margin-top:4px">CSV: {med["csv"]}</p></div>',
+                unsafe_allow_html=True)
+            col_prev, col_del = st.columns([0.75, 0.25])
+            with col_prev:
+                with st.expander(f"📈 Preview spectrum – {med['name']}"):
+                    try:
+                        cb = gh_read_csv_bytes(med["csv"])
+                        if cb:
+                            px,iv = load_spectrum(cb)
+                            fig = make_fig(px,iv,f"{med['name']} – Pixel vs. Intensity","purple")
+                            st.pyplot(fig); plt.close(fig)
+                        else:
+                            st.warning("CSV file not found in repository.")
+                    except Exception as e:
+                        st.error(f"Could not preview: {e}")
+            with col_del:
+                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+                if st.session_state.confirm_delete == med["name"]:
+                    st.markdown('<div class="danger-box">⚠️ Are you sure? This cannot be undone.</div>',
+                                unsafe_allow_html=True)
+                    c1,c2 = st.columns(2)
+                    with c1:
+                        if st.button("✅ Yes, delete", key=f"yes_{idx}"):
+                            try:
+                                new_list = [m for m in medicines if m["name"]!=med["name"]]
+                                _, cur_sha = gh_read_json_full()
+                                gh_write_json(new_list, cur_sha, f"Admin: remove '{med['name']}'")
+                                csv_sha = gh_get_file_sha(f"{DATA_FOLDER}/{med['csv']}")
+                                if csv_sha:
+                                    gh_delete_file(f"{DATA_FOLDER}/{med['csv']}", csv_sha,
+                                                   f"Admin: remove CSV for '{med['name']}'")
+                                st.session_state.confirm_delete = None
+                                st.session_state.delete_success = med["name"]
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"❌ Failed to delete: {e}")
+                    with c2:
+                        if st.button("❌ Cancel", key=f"no_{idx}"):
+                            st.session_state.confirm_delete = None; st.rerun()
+                else:
+                    if st.button("🗑️ Delete", key=f"del_{idx}", type="secondary"):
+                        st.session_state.confirm_delete = med["name"]; st.rerun()
+            st.markdown("")
+
+    # ── Add new medicine ───────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### ➕ Add New Medicine")
+    with st.form("add_form", clear_on_submit=True):
+        ca, cb_ = st.columns(2)
+        with ca:
+            med_name = st.text_input("Medicine Name *", placeholder="e.g. Paracetamol 500mg")
+        with cb_:
+            up_csv = st.file_uploader("Reference CSV (from LSCollector) *", type=["csv"])
+        desc_en = st.text_area("Description (English) *",
+                               placeholder="e.g. NIR spectrum captured with LinkSquare device.", height=80)
+        desc_zh = st.text_area("Description (繁體中文)",
+                               placeholder="e.g. 以 LinkSquare 裝置擷取的近紅外光譜。", height=80)
+        submitted = st.form_submit_button("💾 Save Medicine", use_container_width=True, type="primary")
+        if submitted:
+            errors=[]
+            if not med_name.strip(): errors.append("Medicine name is required.")
+            if up_csv is None: errors.append("Please upload a CSV file.")
+            if not desc_en.strip(): errors.append("English description is required.")
+            existing=[m["name"].strip().lower() for m in medicines]
+            if med_name.strip().lower() in existing:
+                errors.append(f'A medicine named "{med_name.strip()}" already exists.')
+            if errors:
+                for err in errors: st.error(f"❌ {err}")
+            else:
+                csv_bytes = up_csv.read()
                 try:
-                    # Re-generate figures as bytes for PDF
-                    ref_csv_bytes2 = _get_csv_bytes(MEDICINES[name])
-                    px2, int2 = load_spectrum(ref_csv_bytes2, from_bytes=True)
-                    fig_r2 = make_spectrum_fig(px2, int2,
-                                               f"{name} — Pixel vs. Intensity", "purple")
-                    ref_bytes = fig_to_bytes(fig_r2); plt.close(fig_r2)
-
-                    u_px2, u_int2 = load_spectrum(st.session_state.upload_bytes, from_bytes=True)
-                    sample_label  = uploaded.name if uploaded else "Sample"
-                    fig_u2 = make_spectrum_fig(u_px2, u_int2,
-                                               f"{sample_label} — Pixel vs. Intensity", "darkorange")
-                    smp_bytes = fig_to_bytes(fig_u2); plt.close(fig_u2)
-
-                    pdf_bytes = generate_pdf(
-                        med_name       = name,
-                        sample_name    = sample_label,
-                        fig_ref_bytes  = ref_bytes,
-                        fig_sample_bytes = smp_bytes,
-                        res            = res,
-                        explanations   = S["explanations"],
-                        lang           = st.session_state.lang,
-                    )
-                    fname = f"filix_report_{name.replace(' ','_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-                    st.download_button(
-                        label     = "📥 Download PDF Report",
-                        data      = pdf_bytes,
-                        file_name = fname,
-                        mime      = "application/pdf",
-                        key       = "pdf_download",
-                    )
+                    df_c = pd.read_csv(io.BytesIO(csv_bytes), header=0)
+                    if df_c.shape[0]<1 or df_c.shape[1]<2:
+                        st.error("❌ CSV appears empty or has too few columns."); st.stop()
+                    _ = df_c.iloc[0,1:].astype(float).values
                 except Exception as e:
-                    st.error(f"Could not generate PDF: {e}")
+                    st.error(f"❌ Could not parse CSV: {e}"); st.stop()
+                csv_fn = f"{safe_filename(med_name.strip())}.csv"
+                try:
+                    with st.spinner("⏳ Saving to GitHub…"):
+                        gh_upload_csv(csv_fn, csv_bytes, f"Admin: add CSV for '{med_name.strip()}'")
+                        cur_meds, cur_sha = gh_read_json_full()
+                        cur_meds.append({"name":med_name.strip(),"csv":csv_fn,
+                                         "description":desc_en.strip(),"description_zh":desc_zh.strip()})
+                        gh_write_json(cur_meds, cur_sha, f"Admin: add medicine '{med_name.strip()}'")
+                    st.session_state.add_success = True; st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Failed to save to GitHub: {e}")
+
+    # ── Preview CSV ────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 🔍 Preview a CSV before adding")
+    pf = st.file_uploader("Upload CSV to preview", type=["csv"], key="preview_up")
+    if pf:
+        try:
+            raw = pf.read()
+            px,iv = load_spectrum(raw)
+            fig = make_fig(px,iv,f"{pf.name} – Spectrum Preview","darkorange")
+            st.pyplot(fig); plt.close(fig)
+            df_p = pd.read_csv(io.BytesIO(raw), header=0)
+            st.caption(f"✅ Valid CSV — {df_p.shape[0]} scan row(s), {df_p.shape[1]-1} wavelength points")
+        except Exception as e:
+            st.error(f"❌ Could not read CSV: {e}")
+
+    st.markdown("---")
+    st.markdown("<p style='color:#aaa;font-size:0.85rem;text-align:center'>"
+                "Filix Medtech Admin Panel · Changes are committed to GitHub and reflected in the user app automatically</p>",
+                unsafe_allow_html=True)
