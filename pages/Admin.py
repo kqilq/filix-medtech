@@ -315,11 +315,11 @@ if not medicines:
     st.info(S["no_medicines"])
 else:
     for idx, med in enumerate(medicines):
+        desc = med.get("description_zh", "—") if st.session_state.admin_lang == "zh" else med.get("description", "—")
         st.markdown(
             f'<div class="med-row">'
             f'<h4>💊 {med["name"]}</h4>'
-            f'<p><b>{S["label_en"]}:</b> {med.get("description", "—")}</p>'
-            f'<p><b>{S["label_zh"]}:</b> {med.get("description_zh", "—")}</p>'
+            f'<p>{desc}</p>'
             f'<p style="font-size:0.85rem;color:#aaa;margin-top:4px">{S["label_csv"]}: {med["csv"]}</p>'
             f'</div>',
             unsafe_allow_html=True,
