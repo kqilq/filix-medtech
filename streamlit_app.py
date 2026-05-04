@@ -37,10 +37,70 @@ MEDICINES_JSON  = os.path.join(BASE_DIR, "medicines.json")
 MEDICINES_DATA  = os.path.join(BASE_DIR, "medicines_data")
 
 # ─────────────────────────────────────────────
-#  Load medicines from JSON (persistent)
+#  GitHub API helpers (for Streamlit Cloud)
+# ─────────────────────────────────────────────
+import base64
+import requests
+
+GITHUB_REPO   = "kqilq/filix-medtech"
+GITHUB_BRANCH = "main"
+DATA_FOLDER   = "medicines_data"
+
+def _gh_token():
+    try:
+        return st.secrets["GITHUB_TOKEN"]
+    except Exception:
+        return os.environ.get("GITHUB_TOKEN", "")
+
+def _gh_headers():
+    token = _gh_token()
+    if token:
+        return {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    return {"Accept": "application/vnd.github.v3+json"}
+
+def _gh_api(path):
+    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
+
+def gh_read_json_medicines():
+    """Read medicines list from GitHub repo's medicines.json."""
+    r = requests.get(_gh_api("medicines.json"), headers=_gh_headers(),
+                     params={"ref": GITHUB_BRANCH})
+    if r.status_code != 200:
+        return None
+    content = base64.b64decode(r.json()["content"]).decode("utf-8")
+    return json.loads(content).get("medicines", [])
+
+def gh_read_csv_bytes(filename):
+    """Read a CSV file from GitHub repo, returns bytes or None."""
+    for path in [f"{DATA_FOLDER}/{filename}", filename]:
+        r = requests.get(_gh_api(path), headers=_gh_headers(),
+                         params={"ref": GITHUB_BRANCH})
+        if r.status_code == 200:
+            return base64.b64decode(r.json()["content"])
+    return None
+
+# ─────────────────────────────────────────────
+#  Load medicines (GitHub API preferred, local fallback)
 # ─────────────────────────────────────────────
 def load_medicines():
-    """Load the medicines registry from medicines.json."""
+    """Load medicines from GitHub API (Streamlit Cloud) or local JSON (local dev)."""
+    # Try GitHub API first
+    try:
+        entries = gh_read_json_medicines()
+        if entries is not None:
+            result = {}
+            for entry in entries:
+                result[entry["name"]] = {
+                    "csv":            entry["csv"],   # filename only; fetched via GitHub API
+                    "description":    entry.get("description", ""),
+                    "description_zh": entry.get("description_zh", ""),
+                    "from_github":    True,
+                }
+            return result
+    except Exception:
+        pass
+
+    # Fallback: local medicines.json
     if not os.path.exists(MEDICINES_JSON):
         return {}
     with open(MEDICINES_JSON, "r", encoding="utf-8") as f:
@@ -48,7 +108,6 @@ def load_medicines():
     result = {}
     for entry in data.get("medicines", []):
         csv_filename = entry["csv"]
-        # Support both absolute paths and filenames relative to BASE_DIR or medicines_data/
         if os.path.isabs(csv_filename):
             csv_path = csv_filename
         elif os.path.exists(os.path.join(BASE_DIR, csv_filename)):
@@ -61,6 +120,7 @@ def load_medicines():
             "csv":            csv_path,
             "description":    entry.get("description", ""),
             "description_zh": entry.get("description_zh", ""),
+            "from_github":    False,
         }
     return result
 
@@ -183,6 +243,17 @@ STRINGS = {
 # ─────────────────────────────────────────────
 #  Data helpers
 # ─────────────────────────────────────────────
+def _get_csv_bytes(med_info):
+    """Get CSV bytes for a medicine, from GitHub API or local file."""
+    if med_info.get("from_github"):
+        data = gh_read_csv_bytes(med_info["csv"])
+        if data is None:
+            raise FileNotFoundError(f"CSV not found in GitHub repo: {med_info['csv']}")
+        return data
+    else:
+        with open(med_info["csv"], "rb") as f:
+            return f.read()
+
 def clean_file(path_or_bytes, from_bytes=False):
     if from_bytes:
         df = pd.read_csv(io.BytesIO(path_or_bytes), index_col=0)
@@ -209,8 +280,8 @@ def legendre_features(x, degree):
     x_scaled = 2 * (x - np.min(x)) / (np.max(x) - np.min(x)) - 1
     return legendre.legvander(x_scaled, degree)
 
-def run_analysis(standard_path, test_bytes):
-    standard   = clean_file(standard_path)
+def run_analysis(standard_bytes, test_bytes):
+    standard   = clean_file(standard_bytes, from_bytes=True)
     test       = clean_file(test_bytes, from_bytes=True)
     wavelength = standard["Wavelength"].values
     intensity  = standard["Intensity"].values
@@ -763,7 +834,8 @@ elif st.session_state.page == "detail":
     # Reference spectrum
     st.markdown(f"### {S['ref_spectrum']}")
     try:
-        px, intensity = load_spectrum(MEDICINES[name]["csv"])
+        ref_csv_bytes = _get_csv_bytes(MEDICINES[name])
+        px, intensity = load_spectrum(ref_csv_bytes, from_bytes=True)
         fig_ref = make_spectrum_fig(px, intensity, f"{name} — Pixel vs. Intensity", "purple")
         st.pyplot(fig_ref); plt.close(fig_ref)
     except Exception as e:
@@ -801,7 +873,8 @@ elif st.session_state.page == "detail":
         if st.session_state.analysis_res is None:
             with st.spinner(S["running"]):
                 try:
-                    res = run_analysis(MEDICINES[name]["csv"], st.session_state.upload_bytes)
+                    std_bytes = _get_csv_bytes(MEDICINES[name])
+                    res = run_analysis(std_bytes, st.session_state.upload_bytes)
                     st.session_state.analysis_res = res
                 except Exception as e:
                     st.error(f"Analysis failed: {e}")
@@ -838,7 +911,8 @@ elif st.session_state.page == "detail":
             with st.spinner("📄 Preparing PDF report…"):
                 try:
                     # Re-generate figures as bytes for PDF
-                    px2, int2 = load_spectrum(MEDICINES[name]["csv"])
+                    ref_csv_bytes2 = _get_csv_bytes(MEDICINES[name])
+                    px2, int2 = load_spectrum(ref_csv_bytes2, from_bytes=True)
                     fig_r2 = make_spectrum_fig(px2, int2,
                                                f"{name} — Pixel vs. Intensity", "purple")
                     ref_bytes = fig_to_bytes(fig_r2); plt.close(fig_r2)
