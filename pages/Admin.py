@@ -20,7 +20,7 @@ import requests
 # ─────────────────────────────────────────────
 #  Paths (local fallback)
 # ─────────────────────────────────────────────
-BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root
 LOGO_PATH = os.path.join(BASE_DIR, "filix_logo.png")
 
 # ─────────────────────────────────────────────
@@ -167,6 +167,10 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+    /* Hide sidebar navigation so users don't see page links */
+    [data-testid="stSidebarNav"] { display: none !important; }
+    section[data-testid="stSidebar"] { display: none !important; }
+
     html, body, [class*="css"] { font-size: 16px !important; }
     h2 { font-size: 1.5rem !important; }
     h3 { font-size: 1.25rem !important; }
