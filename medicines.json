@@ -11,6 +11,12 @@
       "csv": "medicine2.csv",
       "description": "NIR spectrum captured with LinkSquare device. Wavelength range: ~704 – 1088 nm",
       "description_zh": "以 LinkSquare 裝置擷取的近紅外光譜。波長範圍：約 704 – 1088 nm"
+    },
+    {
+      "name": "test1",
+      "csv": "test1.csv",
+      "description": "/",
+      "description_zh": "/"
     }
   ]
 }
