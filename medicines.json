@@ -17,6 +17,12 @@
       "csv": "test1.csv",
       "description": "/",
       "description_zh": "/"
+    },
+    {
+      "name": "air",
+      "csv": "air.csv",
+      "description": "air",
+      "description_zh": "air"
     }
   ]
 }
