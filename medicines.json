@@ -1,3 +1,10 @@
 {
-  "medicines": []
+  "medicines": [
+    {
+      "name": "A級沉香粉末",
+      "csv": "a級沉香粉末.csv",
+      "description": "A級沉香粉末",
+      "description_zh": ""
+    }
+  ]
 }
