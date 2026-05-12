@@ -490,6 +490,91 @@ if st.session_state.page == "list":
     st.markdown(f"## {S['list_title']}")
     st.markdown(f"<p style='color:#555;margin-top:-8px'>{S['list_subtitle']}</p>",
                 unsafe_allow_html=True)
+
+    # ── How to Use guide ──────────────────────
+    if st.session_state.lang == "en":
+        with st.expander("ℹ️ New here? How to use this app", expanded=False):
+            st.markdown("""
+**Welcome to Filix Medtech – NIR Spectrum Viewer** 👋
+
+This app helps you verify whether a medicine sample matches a known reference using Near-Infrared (NIR) spectroscopy.
+
+---
+
+**What you need before you start:**
+- A CSV file exported from the **LSCollector** app (from your LinkSquare NIR device)
+
+---
+
+**Step-by-step guide:**
+
+**① Select a medicine**
+Browse the list below and click **"View Medicine Info"** on the medicine you want to compare against.
+
+**② View the reference spectrum**
+You'll see the NIR spectrum of the reference medicine — this is what a genuine sample looks like.
+
+**③ Upload your CSV**
+Click **"Upload CSV"** and select the CSV file exported from LSCollector for your sample.
+
+**④ Read the results**
+The app will automatically analyse your sample and show:
+- 📊 A table of polynomial fit results
+- 🔬 Self Accuracy — how well the model fits the reference
+- 🧪 Test Accuracy — how well the same model fits your sample
+- 🎯 **Similarity %** — the key result:
+  - **~100%** → your sample closely matches the reference medicine ✅
+  - **Much lower** → the spectra differ significantly ⚠️
+
+**⑤ Download the PDF report**
+A PDF report is generated automatically — click **"Download PDF Report"** to save it.
+
+---
+
+💡 **Tip:** You can switch between English and 繁體中文 using the button in the top-right corner.
+""")
+    else:
+        with st.expander("ℹ️ 初次使用？了解如何使用本應用程式", expanded=False):
+            st.markdown("""
+**歡迎使用 Filix Medtech – 近紅外光譜檢視器** 👋
+
+本應用程式利用近紅外光譜（NIR）技術，協助您驗證藥品樣本是否與已知參考藥品相符。
+
+---
+
+**開始前您需要準備：**
+- 從 **LSCollector** 應用程式（配合 LinkSquare NIR 裝置）匯出的 CSV 檔案
+
+---
+
+**使用步驟：**
+
+**① 選擇藥品**
+瀏覽下方列表，點擊您想比較的藥品旁的 **「查看藥品資訊」**。
+
+**② 查看參考光譜**
+您將看到參考藥品的近紅外光譜——這是正品樣本的光譜形狀。
+
+**③ 上傳您的 CSV**
+點擊 **「上傳 CSV」**，選擇從 LSCollector 匯出的樣本 CSV 檔案。
+
+**④ 閱讀分析結果**
+應用程式將自動分析您的樣本並顯示：
+- 📊 多項式擬合結果表格
+- 🔬 自身準確度——模型對參考藥品的擬合程度
+- 🧪 測試準確度——相同模型對您樣本的擬合程度
+- 🎯 **相似度 %**——最關鍵的結果：
+  - **約 100%** → 您的樣本與參考藥品高度相符 ✅
+  - **遠低於 100%** → 光譜差異顯著 ⚠️
+
+**⑤ 下載 PDF 報告**
+報告將自動生成——點擊 **「下載 PDF 報告」** 即可儲存。
+
+---
+
+💡 **提示：** 您可以點擊右上角的按鈕在英文和繁體中文之間切換。
+""")
+
     st.markdown("---")
     for name, info in MEDICINES.items():
         desc = info["description_zh"] if st.session_state.lang=="zh" else info["description"]
