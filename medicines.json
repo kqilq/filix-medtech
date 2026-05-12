@@ -5,6 +5,12 @@
       "csv": "a級沉香粉末.csv",
       "description": "A級沉香粉末",
       "description_zh": ""
+    },
+    {
+      "name": "B級沉香粉末",
+      "csv": "b級沉香粉末.csv",
+      "description": "B級沉香粉末",
+      "description_zh": ""
     }
   ]
 }
